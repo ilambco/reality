@@ -1,123 +1,137 @@
 #!/bin/bash
 
-# Reality VLESS + TCP 一键部署脚本，支持二维码生成
-# 默认不加 flow，支持用户选择启用 flow=xtls-rprx-vision
+CONFIG_DIR="/usr/local/etc/xray/nodes"
+MAIN_CONFIG="/usr/local/etc/xray/config.json"
+DB_FILE="/usr/local/etc/xray/nodes.db"
+XRAY_BIN="/usr/local/bin/xray"
 
-echo -e "\n========== Reality 节点部署开始 ==========\n"
+mkdir -p "$CONFIG_DIR"
+touch "$DB_FILE"
 
-# 安装依赖
-apt update -y
-apt install curl unzip qrencode -y
+function merge_configs() {
+  local files=("$CONFIG_DIR"/*.json)
+  {
+    echo '{ "log": { "loglevel": "warning" }, "inbounds": ['
+    for f in "${files[@]}"; do
+      cat "$f" | jq '.' 
+    done | jq -s 'add | .[]' | jq -s '.'
+    echo '], "outbounds": [{ "protocol": "freedom" }] }'
+  } > "$MAIN_CONFIG"
+}
 
-# 用户交互设置
-read -p "请输入用于连接的域名或IP（默认自动获取VPS IP）: " DOMAIN
-read -p "请输入监听端口（默认 443）: " PORT
-read -p "请输入伪装域名（Reality伪装目标，默认 itunes.apple.com）: " FAKE_DOMAIN
-read -p "是否启用 flow=xtls-rprx-vision? [y/N]: " USE_FLOW
+function restart_xray() {
+  systemctl restart xray
+}
 
-DOMAIN=${DOMAIN:-$(curl -s ipv4.ip.sb)}
-PORT=${PORT:-443}
-FAKE_DOMAIN=${FAKE_DOMAIN:-itunes.apple.com}
-ENABLE_FLOW=false
-[[ "$USE_FLOW" =~ ^[Yy]$ ]] && ENABLE_FLOW=true
+function add_node() {
+  read -p "请输入域名或IP（默认自动获取VPS IP）: " DOMAIN
+  DOMAIN=${DOMAIN:-$(curl -s ipv4.ip.sb)}
+  read -p "请输入监听端口（例如 10001）: " PORT
+  read -p "请输入伪装域名（默认 itunes.apple.com）: " FAKE_DOMAIN
+  read -p "是否启用 flow=xtls-rprx-vision? [y/N]: " USE_FLOW
 
-# 安装 Xray
-echo -e "\n>>> 安装 Xray-core 最新版本..."
-XRAY_ZIP="/tmp/Xray.zip"
-curl -L -o $XRAY_ZIP https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
-unzip -o $XRAY_ZIP -d /usr/local/bin/
-chmod +x /usr/local/bin/xray
+  FAKE_DOMAIN=${FAKE_DOMAIN:-itunes.apple.com}
+  [[ "$USE_FLOW" =~ ^[Yy]$ ]] && FLOW=true || FLOW=false
 
-# 生成密钥对
-echo -e "\n>>> 生成 Reality 密钥对..."
-KEYS=$(xray x25519)
-PRIVATE_KEY=$(echo "$KEYS" | awk '/Private/{print $3}')
-PUBLIC_KEY=$(echo "$KEYS" | awk '/Public/{print $3}')
-SHORT_ID=$(openssl rand -hex 8)
-UUID=$(cat /proc/sys/kernel/random/uuid)
+  KEYS=$($XRAY_BIN x25519)
+  PRIVATE_KEY=$(echo "$KEYS" | awk '/Private/{print $3}')
+  PUBLIC_KEY=$(echo "$KEYS" | awk '/Public/{print $3}')
+  SHORT_ID=$(openssl rand -hex 8)
+  UUID=$(cat /proc/sys/kernel/random/uuid)
 
-# 写入配置文件
-echo -e "\n>>> 写入 Xray 配置文件..."
-mkdir -p /usr/local/etc/xray
-cat > /usr/local/etc/xray/config.json <<EOF
+  NODE_CONFIG="$CONFIG_DIR/$PORT.json"
+  cat > "$NODE_CONFIG" <<EOF
 {
-  "log": { "loglevel": "warning" },
-  "inbounds": [{
-    "port": $PORT,
-    "protocol": "vless",
-    "settings": {
-      "clients": [{
-        "id": "$UUID",
-        "flow": "xtls-rprx-vision"
-      }],
-      "decryption": "none"
-    },
-    "streamSettings": {
-      "network": "tcp",
-      "security": "reality",
-      "realitySettings": {
-        "show": false,
-        "dest": "$FAKE_DOMAIN:443",
-        "xver": 0,
-        "serverNames": ["$FAKE_DOMAIN"],
-        "privateKey": "$PRIVATE_KEY",
-        "shortIds": ["$SHORT_ID"]
-      }
+  "port": $PORT,
+  "protocol": "vless",
+  "settings": {
+    "clients": [{
+      "id": "$UUID"$( [ "$FLOW" == "true" ] && echo ', "flow": "xtls-rprx-vision"' )
+    }],
+    "decryption": "none"
+  },
+  "streamSettings": {
+    "network": "tcp",
+    "security": "reality",
+    "realitySettings": {
+      "show": false,
+      "dest": "$FAKE_DOMAIN:443",
+      "xver": 0,
+      "serverNames": ["$FAKE_DOMAIN"],
+      "privateKey": "$PRIVATE_KEY",
+      "shortIds": ["$SHORT_ID"]
     }
-  }],
-  "outbounds": [{ "protocol": "freedom" }]
+  }
 }
 EOF
 
-# flow 不启用则删除配置中 flow 项
-if ! $ENABLE_FLOW; then
-  sed -i '/"flow"/d' /usr/local/etc/xray/config.json
-fi
+  merge_configs
+  restart_xray
 
-# systemd 启动服务
-echo -e "\n>>> 写入 systemd 服务..."
-cat > /etc/systemd/system/xray.service <<EOF
-[Unit]
-Description=Xray Service
-After=network.target
+  echo "$PORT $UUID $PUBLIC_KEY $SHORT_ID $FAKE_DOMAIN $FLOW $DOMAIN" >> "$DB_FILE"
 
-[Service]
-ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json
-Restart=always
-User=nobody
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+  LINK="vless://$UUID@$DOMAIN:$PORT?encryption=none&security=reality&sni=$FAKE_DOMAIN&fp=chrome&pbk=$PUBLIC_KEY&sid=$SHORT_ID&type=tcp"
+  [ "$FLOW" == "true" ] && LINK="$LINK&flow=xtls-rprx-vision"
+  LINK="$LINK#Reality-$DOMAIN"
 
-[Install]
-WantedBy=multi-user.target
-EOF
+  echo -e "\n>>> 节点导入链接:\n$LINK"
+  qrencode -t ANSIUTF8 "$LINK"
+}
 
-systemctl daemon-reexec
-systemctl daemon-reload
-systemctl enable xray
-systemctl restart xray
+function delete_node() {
+  read -p "请输入要删除的端口号: " PORT
+  rm -f "$CONFIG_DIR/$PORT.json"
+  sed -i "/^$PORT /d" "$DB_FILE"
+  merge_configs
+  restart_xray
+  echo "节点 $PORT 删除成功并释放端口。"
+}
 
-# 构造导入链接
-LINK="vless://$UUID@$DOMAIN:$PORT?encryption=none&security=reality&sni=$FAKE_DOMAIN&fp=chrome&pbk=$PUBLIC_KEY&sid=$SHORT_ID&type=tcp"
-[[ "$ENABLE_FLOW" == "true" ]] && LINK="$LINK&flow=xtls-rprx-vision"
-LINK="$LINK#Reality-$DOMAIN"
+function list_nodes() {
+  echo -e "\n已添加的节点信息:\n"
+  cat "$DB_FILE" | while read line; do
+    set -- $line
+    echo "端口: $1 | UUID: $2 | PublicKey: $3 | ShortID: $4 | SNI: $5 | Flow: $6 | 域名: $7"
+  done
+}
 
-# 输出信息
-echo -e "\n================ Reality 节点部署成功 ================\n"
-echo -e "协议: VLESS + TCP + Reality"
-echo -e "地址: $DOMAIN"
-echo -e "端口: $PORT"
-echo -e "UUID: $UUID"
-echo -e "PublicKey: $PUBLIC_KEY"
-echo -e "ShortID: $SHORT_ID"
-echo -e "伪装域名: $FAKE_DOMAIN"
-echo -e "Reality 指纹: chrome"
-$ENABLE_FLOW && echo -e "Flow: xtls-rprx-vision" || echo -e "Flow: 未启用"
+function start_xray() {
+  systemctl start xray && echo "Xray 启动成功"
+}
 
-echo -e "\n>>> 节点导入链接如下（v2rayN/v2rayNG 直接导入）:\n$LINK"
+function stop_xray() {
+  systemctl stop xray && echo "Xray 已停止"
+}
 
-# 生成二维码
-echo -e "\n>>> 节点二维码（扫码导入）:\n"
-qrencode -t ANSIUTF8 "$LINK"
+function status_xray() {
+  systemctl status xray
+}
 
-echo -e "\n======================================================\n"
+function menu() {
+  while true; do
+    echo -e "\n===== Reality 管理菜单 ====="
+    echo "1. 添加新节点"
+    echo "2. 删除节点"
+    echo "3. 查看所有节点"
+    echo "4. 启动 Xray"
+    echo "5. 停止 Xray"
+    echo "6. 重启 Xray"
+    echo "7. 查看 Xray 状态"
+    echo "0. 退出"
+    echo "=============================="
+    read -p "请输入选项: " opt
+    case $opt in
+      1) add_node ;;
+      2) delete_node ;;
+      3) list_nodes ;;
+      4) start_xray ;;
+      5) stop_xray ;;
+      6) restart_xray ;;
+      7) status_xray ;;
+      0) exit 0 ;;
+      *) echo "无效选项" ;;
+    esac
+  done
+}
+
+menu
