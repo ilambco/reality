@@ -1,5 +1,20 @@
 #!/bin/bash
 
+# 检查是否为root用户
+if [ "$(id -u)" != "0" ]; then
+   echo "此脚本必须以root身份运行" 1>&2
+   exit 1
+fi
+
+# 安装必要的依赖
+apt update
+apt install -y curl wget jq qrencode openssl
+
+# 安装Xray
+echo "正在安装Xray..."
+bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+
+# 创建必要的目录和文件
 CONFIG_DIR="/usr/local/etc/xray/nodes"
 MAIN_CONFIG="/usr/local/etc/xray/config.json"
 DB_FILE="/usr/local/etc/xray/nodes.db"
@@ -8,6 +23,50 @@ XRAY_BIN="/usr/local/bin/xray"
 mkdir -p "$CONFIG_DIR"
 touch "$DB_FILE"
 
+# 设置默认配置文件
+cat > "$MAIN_CONFIG" <<EOF
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [],
+  "outbounds": [
+    {
+      "protocol": "freedom"
+    }
+  ]
+}
+EOF
+
+# 创建systemd服务文件（如果不存在）
+if [ ! -f "/etc/systemd/system/xray.service" ]; then
+    cat > /etc/systemd/system/xray.service <<EOF
+[Unit]
+Description=Xray Service
+After=network.target nss-lookup.target
+
+[Service]
+User=nobody
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ExecStart=$XRAY_BIN run -config $MAIN_CONFIG
+Restart=on-failure
+RestartPreventExitStatus=23
+LimitNPROC=10000
+LimitNOFILE=1000000
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable xray
+fi
+
+# 启动Xray服务
+systemctl start xray
+
+# 定义功能函数
 function merge_configs() {
   local files=("$CONFIG_DIR"/*.json)
   {
@@ -75,7 +134,11 @@ EOF
   LINK="$LINK#Reality-$DOMAIN"
 
   echo -e "\n>>> 节点导入链接:\n$LINK"
-  qrencode -t ANSIUTF8 "$LINK"
+  if command -v qrencode &> /dev/null; then
+    qrencode -t ANSIUTF8 "$LINK"
+  else
+    echo "注意: qrencode未安装，无法生成二维码"
+  fi
 }
 
 function delete_node() {
@@ -134,4 +197,24 @@ function menu() {
   done
 }
 
+# 显示欢迎信息
+echo "===================================="
+echo " Xray Reality 一键安装管理脚本"
+echo " 版本: 1.1"
+echo " 作者: 根据用户需求定制"
+echo "===================================="
+
+# 检查防火墙
+if ! command -v ufw &> /dev/null; then
+  echo "检测到未安装UFW防火墙，建议安装以增强安全性"
+  read -p "是否要安装UFW防火墙? [y/N]: " install_ufw
+  if [[ "$install_ufw" =~ ^[Yy]$ ]]; then
+    apt install -y ufw
+    ufw allow ssh
+    ufw enable
+    echo "UFW防火墙已安装并启用，SSH端口已放行"
+  fi
+fi
+
+# 进入主菜单
 menu
