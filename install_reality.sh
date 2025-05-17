@@ -1,270 +1,387 @@
 #!/bin/bash
 
-CONFIG_DIR="/usr/local/etc/xray/nodes"
-MAIN_CONFIG="/usr/local/etc/xray/config.json"
-DB_FILE="/usr/local/etc/xray/nodes.db"
-XRAY_BIN="/usr/local/bin/xray"
-
-# 创建必要目录和文件
-mkdir -p "$CONFIG_DIR"
-touch "$DB_FILE"
-
-function check_dependencies() {
-  local missing=()
-  if ! command -v jq &> /dev/null; then
-    missing+=("jq")
-  fi
-  if ! command -v qrencode &> /dev/null; then
-    missing+=("qrencode")
-  fi
-  if ! command -v openssl &> /dev/null; then
-    missing+=("openssl")
-  fi
-  
-  if [ ${#missing[@]} -gt 0 ]; then
-    echo "缺少必要的依赖包: ${missing[*]}"
-    read -p "是否自动安装这些依赖？[Y/n] " answer
-    if [[ "$answer" =~ ^[Yy]?$ ]]; then
-      apt-get update
-      apt-get install -y "${missing[@]}"
-    else
-      echo "请手动安装依赖后再运行脚本。"
-      exit 1
-    fi
-  fi
-}
-
-function merge_configs() {
-  local files=("$CONFIG_DIR"/*.json)
-  {
-    echo '{ "log": { "loglevel": "warning" }, "inbounds": ['
-    for f in "${files[@]}"; do
-      cat "$f" | jq '.' 
-    done | jq -s 'add | .[]' | jq -s '.'
-    echo '], "outbounds": [{ "protocol": "freedom" }] }'
-  } > "$MAIN_CONFIG"
-}
-
-function install_xray() {
-  if [ -f "$XRAY_BIN" ]; then
-    echo "Xray 已经安装。"
-    return
-  fi
-  
-  echo "正在安装 Xray..."
-  bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
-  
-  if [ ! -f "$XRAY_BIN" ]; then
-    echo "Xray 安装失败！"
-    exit 1
-  fi
-  
-  systemctl enable xray
-  systemctl start xray
-  echo "Xray 安装成功并已启动。"
-}
-
-function add_node() {
-  if [ ! -f "$XRAY_BIN" ]; then
-    echo "Xray 未安装，请先安装 Xray。"
-    return
-  fi
-  
-  read -p "请输入域名或IP（默认自动获取VPS IP）: " DOMAIN
-  DOMAIN=${DOMAIN:-$(curl -s ipv4.ip.sb)}
-  read -p "请输入监听端口（例如 10001）: " PORT
-  read -p "请输入伪装域名（默认 itunes.apple.com）: " FAKE_DOMAIN
-  read -p "是否启用 flow=xtls-rprx-vision? [y/N]: " USE_FLOW
-
-  FAKE_DOMAIN=${FAKE_DOMAIN:-itunes.apple.com}
-  [[ "$USE_FLOW" =~ ^[Yy]$ ]] && FLOW=true || FLOW=false
-
-  KEYS=$($XRAY_BIN x25519)
-  PRIVATE_KEY=$(echo "$KEYS" | awk '/Private/{print $3}')
-  PUBLIC_KEY=$(echo "$KEYS" | awk '/Public/{print $3}')
-  SHORT_ID=$(openssl rand -hex 8)
-  UUID=$(cat /proc/sys/kernel/random/uuid)
-
-  NODE_CONFIG="$CONFIG_DIR/$PORT.json"
-  cat > "$NODE_CONFIG" <<EOF
-{
-  "port": $PORT,
-  "protocol": "vless",
-  "settings": {
-    "clients": [{
-      "id": "$UUID"$( [ "$FLOW" == "true" ] && echo ', "flow": "xtls-rprx-vision"' )
-    }],
-    "decryption": "none"
-  },
-  "streamSettings": {
-    "network": "tcp",
-    "security": "reality",
-    "realitySettings": {
-      "show": false,
-      "dest": "$FAKE_DOMAIN:443",
-      "xver": 0,
-      "serverNames": ["$FAKE_DOMAIN"],
-      "privateKey": "$PRIVATE_KEY",
-      "shortIds": ["$SHORT_ID"]
-    }
-  }
-}
-EOF
-
-  merge_configs
-  systemctl restart xray
-
-  echo "$PORT $UUID $PUBLIC_KEY $SHORT_ID $FAKE_DOMAIN $FLOW $DOMAIN" >> "$DB_FILE"
-
-  LINK="vless://$UUID@$DOMAIN:$PORT?encryption=none&security=reality&sni=$FAKE_DOMAIN&fp=chrome&pbk=$PUBLIC_KEY&sid=$SHORT_ID&type=tcp"
-  [ "$FLOW" == "true" ] && LINK="$LINK&flow=xtls-rprx-vision"
-  LINK="$LINK#Reality-$DOMAIN"
-
-  echo -e "\n>>> 节点导入链接:\n$LINK"
-  if command -v qrencode &> /dev/null; then
-    qrencode -t ANSIUTF8 "$LINK"
-  else
-    echo "提示: 安装 qrencode 可以显示二维码 (apt-get install qrencode)"
-  fi
-}
-
-function delete_node() {
-  read -p "请输入要删除的端口号: " PORT
-  rm -f "$CONFIG_DIR/$PORT.json"
-  sed -i "/^$PORT /d" "$DB_FILE"
-  merge_configs
-  systemctl restart xray
-  echo "节点 $PORT 删除成功并释放端口。"
-}
-
-function list_nodes() {
-  echo -e "\n已添加的节点信息:\n"
-  if [ ! -s "$DB_FILE" ]; then
-    echo "没有找到任何节点。"
-    return
-  fi
-  cat "$DB_FILE" | while read line; do
-    set -- $line
-    echo "端口: $1 | UUID: $2 | PublicKey: $3 | ShortID: $4 | SNI: $5 | Flow: $6 | 域名: $7"
-  done
-}
-
-function manage_firewall() {
-  if ! command -v ufw &> /dev/null; then
-    echo "UFW 防火墙未安装。"
-    read -p "是否要安装并启用 UFW？[Y/n] " answer
-    if [[ "$answer" =~ ^[Yy]?$ ]]; then
-      apt-get install -y ufw
-      ufw enable
-      echo "UFW 已安装并启用。"
-    else
-      return
-    fi
-  fi
-
-  while true; do
-    echo -e "\n===== 防火墙管理 ====="
-    echo "1. 开放端口"
-    echo "2. 删除端口"
-    echo "3. 查看防火墙状态"
-    echo "4. 启用防火墙"
-    echo "5. 禁用防火墙"
-    echo "0. 返回上级菜单"
-    echo "======================"
-    read -p "请输入选项: " opt
-    case $opt in
-      1) 
-        read -p "请输入要开放的端口号: " port
-        ufw allow "$port"
-        echo "端口 $port 已开放。"
-        ;;
-      2) 
-        read -p "请输入要删除的端口规则: " port
-        ufw delete allow "$port"
-        echo "端口 $port 规则已删除。"
-        ;;
-      3) ufw status ;;
-      4) ufw enable ;;
-      5) ufw disable ;;
-      0) break ;;
-      *) echo "无效选项" ;;
-    esac
-  done
-}
-
-function node_management() {
-  while true; do
-    echo -e "\n===== 节点管理 ====="
-    echo "1. 添加节点"
-    echo "2. 删除节点"
-    echo "3. 查看节点"
-    echo "0. 返回上级菜单"
-    echo "===================="
-    read -p "请输入选项: " opt
-    case $opt in
-      1) add_node ;;
-      2) delete_node ;;
-      3) list_nodes ;;
-      0) break ;;
-      *) echo "无效选项" ;;
-    esac
-  done
-}
-
-function xray_management() {
-  while true; do
-    echo -e "\n===== Xray 管理 ====="
-    echo "1. 安装 Xray"
-    echo "2. 启动 Xray"
-    echo "3. 停止 Xray"
-    echo "4. 重启 Xray"
-    echo "5. 查看 Xray 状态"
-    echo "0. 返回上级菜单"
-    echo "===================="
-    read -p "请输入选项: " opt
-    case $opt in
-      1) install_xray ;;
-      2) systemctl start xray && echo "Xray 启动成功" ;;
-      3) systemctl stop xray && echo "Xray 已停止" ;;
-      4) systemctl restart xray && echo "Xray 重启成功" ;;
-      5) systemctl status xray ;;
-      0) break ;;
-      *) echo "无效选项" ;;
-    esac
-  done
-}
-
-function main_menu() {
-  check_dependencies
-  while true; do
-    echo -e "\n===== Reality 管理菜单 ====="
-    echo "1. 节点管理"
-    echo "2. Xray 管理"
-    echo "3. 防火墙管理"
-    echo "0. 退出"
-    echo "=============================="
-    read -p "请输入选项: " opt
-    case $opt in
-      1) node_management ;;
-      2) xray_management ;;
-      3) manage_firewall ;;
-      0) exit 0 ;;
-      *) echo "无效选项" ;;
-    esac
-  done
-}
-
-# 检查是否以 root 用户运行
-if [ "$(id -u)" -ne 0 ]; then
-  echo "请使用 root 用户运行此脚本。"
+# 检查是否以root用户运行
+if [ "$EUID" -ne 0 ]; then
+  echo "错误：请以root用户运行此脚本。"
   exit 1
 fi
 
-# 创建快捷命令
-if ! grep -q "alias ilamb='bash $(realpath $0)'" ~/.bashrc; then
-  echo "alias ilamb='bash $(realpath $0)'" >> ~/.bashrc
-  source ~/.bashrc
-  echo "已创建快捷命令 'ilamb'，下次登录后可直接使用。"
-fi
+# 检查并安装依赖
+install_dependencies() {
+    echo "检查并安装依赖..."
+    if command -v apt > /dev/null; then
+        apt update
+        apt install -y curl jq uuid-runtime
+    elif command -v yum > /dev/null; then
+        yum update -y
+        yum install -y curl jq uuidgen
+    elif command -v dnf > /dev/null; then
+        dnf update -y
+        dnf install -y curl jq uuidgen
+    else
+        echo "错误：不支持的操作系统，无法安装依赖。请手动安装 curl, jq, uuidgen。"
+        exit 1
+    fi
 
-main_menu
+    if ! command -v curl > /dev/null || ! command -v jq > /dev/null || ! command -v uuidgen > /dev/null; then
+        echo "错误：依赖安装失败，请手动安装 curl, jq, uuidgen 后重试。"
+        exit 1
+    fi
+    echo "依赖检查完成。"
+}
+
+# 安装或更新 Xray
+install_xray() {
+    echo "安装或更新 Xray..."
+    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+    if [ $? -ne 0 ]; then
+        echo "错误：Xray 安装或更新失败。"
+        exit 1
+    fi
+    echo "Xray 安装或更新完成。"
+    systemctl enable xray
+}
+
+# 生成 VLESS Reality 配置片段
+generate_reality_config() {
+    local domain="$1"
+    local port="$2"
+    local dest="$3"
+
+    echo "正在生成 Reality 密钥对..."
+    local key_pair=$(xray x25519)
+    local private_key=$(echo "$key_pair" | grep 'Private key:' | awk '{print $3}')
+    local public_key=$(echo "$key_pair" | grep 'Public key:' | awk '{print $3}')
+
+    echo "正在生成 Short ID..."
+    local short_id=$(xray generate shortid)
+
+    local uuid=$(uuidgen)
+    local tag="vless-reality-$port-$uuid" # 为每个节点生成一个唯一的标签
+
+    cat <<EOF
+    {
+      "listen": "0.0.0.0",
+      "port": $port,
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "$uuid",
+            "level": 0
+          }
+        ],
+        "disallowInsecure": true
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "$dest",
+          "xver": 0,
+          "privateKey": "$private_key",
+          "minClientVersion": "",
+          "maxClientVersion": "",
+          "maxTimeDiff": 0,
+          "shortIds": [
+            "$short_id"
+          ],
+          "serverNames": [
+            "$domain"
+          ]
+        }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": [
+          "http",
+          "tls"
+        ]
+      },
+      "tag": "$tag"
+    }
+EOF
+    echo "$uuid,$public_key,$short_id,$tag" # 返回 uuid, public_key, short_id, tag 供后续生成链接使用
+}
+
+# URL编码函数
+urlencode() {
+    local string="$1"
+    local strlen=${#string}
+    local encoded=""
+    local char
+    for (( i=0; i<strlen; i++ )); do
+        char=${string:$i:1}
+        case "$char" in
+            [a-zA-Z0-9.~_-]) encoded+="$char" ;;
+            *) printf '%%%02X' "'$char" ;;
+        esac
+    done
+    echo "$encoded"
+}
+
+# 生成 VLESS 链接
+generate_vless_link() {
+    local uuid="$1"
+    local address="$2"
+    local port="$3"
+    local public_key="$4"
+    local short_id="$5"
+    local sni="$6"
+    local tag="$7" # Use tag for the fragment
+
+    local encoded_public_key=$(urlencode "$public_key")
+    local encoded_short_id=$(urlencode "$short_id")
+    local encoded_sni=$(urlencode "$sni")
+    local encoded_tag=$(urlencode "$tag")
+
+    # 使用 chrome 指纹，这是 Reality 推荐的
+    local fingerprint="chrome"
+
+    echo "vless://${uuid}@${address}:${port}?security=reality&type=tcp&pbk=${encoded_public_key}&sid=${encoded_short_id}&sni=${encoded_sni}&fp=${fingerprint}#${encoded_tag}"
+}
+
+
+# 添加节点
+add_node() {
+    echo "--- 添加 VLESS+TCP+Reality 节点 ---"
+    read -p "请输入节点监听端口 (例如: 443): " node_port
+    if ! [[ "$node_port" =~ ^[0-9]+$ ]] || [ "$node_port" -le 0 ] || [ "$node_port" -gt 65535 ]; then
+        echo "错误：端口号无效。"
+        return
+    fi
+
+    read -p "请输入 Reality 伪装域名 (例如: example.com): " reality_domain
+    if [ -z "$reality_domain" ]; then
+        echo "错误：域名不能为空。"
+        return
+    fi
+
+    read -p "请输入 Reality 伪装目标地址 (例如: www.apple.com:443): " reality_dest
+    if [ -z "$reality_dest" ]; then
+        echo "错误：伪装目标地址不能为空。"
+        return
+    fi
+
+    local config_path="/etc/xray/config.json"
+    local node_config_info=$(generate_reality_config "$reality_domain" "$node_port" "$reality_dest")
+    local uuid=$(echo "$node_config_info" | cut -d',' -f1)
+    local public_key=$(echo "$node_config_info" | cut -d',' -f2)
+    local short_id=$(echo "$node_config_info" | cut -d',' -f3)
+    local tag=$(echo "$node_config_info" | cut -d',' -f4)
+    local node_config_json=$(echo "$node_config_info" | sed 's/.*{//' | sed 's/}//') # 提取JSON片段
+
+    if [ ! -f "$config_path" ]; then
+        # 创建基础配置
+        cat <<EOF > "$config_path"
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    $node_config_json
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "settings": {}
+    }
+  ]
+}
+EOF
+    else
+        # 在现有配置的inbounds数组中添加新的节点配置
+        local temp_config=$(jq --argjson new_inbound "$node_config_json" '.inbounds += [$new_inbound]' "$config_path")
+        echo "$temp_config" > "$config_path"
+    fi
+
+    if [ $? -ne 0 ]; then
+        echo "错误：无法更新 Xray 配置文件。"
+        return
+    fi
+
+    systemctl restart xray
+    if [ $? -ne 0 ]; then
+        echo "错误：Xray 服务重启失败，请检查配置和日志。"
+        return
+    fi
+
+    # 打开防火墙端口
+    echo "尝试打开防火墙端口 $node_port..."
+    if command -v firewall-cmd > /dev/null; then
+        firewall-cmd --zone=public --add-port=$node_port/tcp --permanent
+        firewall-cmd --reload
+        echo "firewalld 规则已更新。"
+    elif command -v ufw > /dev/null; then
+        ufw allow $node_port/tcp
+        ufw reload
+        echo "UFW 规则已更新。"
+    else
+        echo "未检测到 firewalld 或 ufw，请手动配置防火墙规则放行端口 $node_port。"
+    fi
+
+    local vless_link=$(generate_vless_link "$uuid" "$reality_domain" "$node_port" "$public_key" "$short_id" "$reality_domain" "$tag")
+
+    echo "--- 节点添加成功 ---"
+    echo "UUID: $uuid"
+    echo "监听端口: $node_port"
+    echo "伪装域名 (SNI): $reality_domain"
+    echo "Reality 公钥 (pbk): $public_key"
+    echo "Reality 短 ID (sid): $short_id"
+    echo "伪装目标地址 (dest): $reality_dest"
+    echo "VLESS 链接:"
+    echo "$vless_link"
+    echo "--------------------"
+}
+
+# 查看节点
+view_nodes() {
+    echo "--- 已配置的 VLESS+TCP+Reality 节点 ---"
+    local config_path="/etc/xray/config.json"
+    if [ ! -f "$config_path" ]; then
+        echo "Xray 配置文件不存在，没有找到节点。"
+        return
+    fi
+
+    local node_count=0
+    jq -c '.inbounds[] | select(.protocol == "vless" and .streamSettings.network == "tcp" and .streamSettings.security == "reality")' "$config_path" | while read -r inbound; do
+        local uuid=$(echo "$inbound" | jq -r '.settings.clients[0].id')
+        local port=$(echo "$inbound" | jq -r '.port')
+        local domain=$(echo "$inbound" | jq -r '.streamSettings.realitySettings.serverNames[0]')
+        local public_key=$(echo "$inbound" | jq -r '.streamSettings.realitySettings.publicKey')
+        local short_id=$(echo "$inbound" | jq -r '.streamSettings.realitySettings.shortIds[0]')
+        local dest=$(echo "$inbound" | jq -r '.streamSettings.realitySettings.dest')
+        local tag=$(echo "$inbound" | jq -r '.tag')
+
+        node_count=$((node_count + 1))
+        echo "--- 节点 $node_count ---"
+        echo "UUID: $uuid"
+        echo "监听端口: $port"
+        echo "伪装域名 (SNI): $domain"
+        echo "Reality 公钥 (pbk): $public_key"
+        echo "Reality 短 ID (sid): $short_id"
+        echo "伪装目标地址 (dest): $dest"
+        local vless_link=$(generate_vless_link "$uuid" "$domain" "$port" "$public_key" "$short_id" "$domain" "$tag")
+        echo "VLESS 链接:"
+        echo "$vless_link"
+        echo "--------------------"
+    done
+
+    if [ "$node_count" -eq 0 ]; then
+        echo "没有找到 VLESS+TCP+Reality 节点。"
+    fi
+}
+
+# 删除节点
+delete_node() {
+    echo "--- 删除 VLESS+TCP+Reality 节点 ---"
+    local config_path="/etc/xray/config.json"
+    if [ ! -f "$config_path" ]; then
+        echo "Xray 配置文件不存在，无法删除节点。"
+        return
+    fi
+
+    local nodes_info=()
+    local node_count=0
+     jq -c '.inbounds[] | select(.protocol == "vless" and .streamSettings.network == "tcp" and .streamSettings.security == "reality")' "$config_path" | while read -r inbound; do
+        local uuid=$(echo "$inbound" | jq -r '.settings.clients[0].id')
+        local port=$(echo "$inbound" | jq -r '.port')
+        local domain=$(echo "$inbound" | jq -r '.streamSettings.realitySettings.serverNames[0]')
+        local tag=$(echo "$inbound" | jq -r '.tag')
+        node_count=$((node_count + 1))
+        nodes_info+=("$uuid,$port,$domain,$tag")
+        echo "$node_count. UUID: $uuid, 端口: $port, 域名: $domain, Tag: $tag"
+    done
+
+    if [ "$node_count" -eq 0 ]; then
+        echo "没有找到可删除的 VLESS+TCP+Reality 节点。"
+        return
+    fi
+
+    read -p "请输入要删除的节点编号: " delete_index
+    if ! [[ "$delete_index" =~ ^[0-9]+$ ]] || [ "$delete_index" -le 0 ] || [ "$delete_index" -gt "$node_count" ]; then
+        echo "错误：无效的节点编号。"
+        return
+    fi
+
+    local target_uuid=$(echo "${nodes_info[$delete_index-1]}" | cut -d',' -f1)
+    local target_port=$(echo "${nodes_info[$delete_index-1]}" | cut -d',' -f2)
+
+    read -p "确定要删除节点 $delete_index (UUID: $target_uuid) 吗？(y/N): " confirm_delete
+    if [[ "$confirm_delete" != "y" && "$confirm_delete" != "Y" ]]; then
+        echo "取消删除。"
+        return
+    fi
+
+    # 使用 jq 删除指定的 inbound
+    local temp_config=$(jq --arg uuid "$target_uuid" 'del(.inbounds[] | select(.protocol == "vless" and .settings.clients[0].id == $uuid))' "$config_path")
+
+    if [ -z "$temp_config" ] || [ "$temp_config" == "null" ]; then
+         echo "错误：无法从配置中删除节点，或者删除后配置变为空。请手动检查 $config_path"
+         return
+    fi
+
+    echo "$temp_config" > "$config_path"
+
+    if [ $? -ne 0 ]; then
+        echo "错误：无法更新 Xray 配置文件。"
+        return
+    fi
+
+    systemctl restart xray
+    if [ $? -ne 0 ]; then
+        echo "错误：Xray 服务重启失败，请检查配置和日志。"
+        return
+    fi
+
+    echo "节点 (UUID: $target_uuid) 已成功删除。"
+    echo "请注意：脚本不会自动关闭防火墙端口 $target_port，如果该端口不再被任何节点使用，请手动关闭。"
+}
+
+# 主菜单
+show_menu() {
+    echo "--- VLESS+TCP+Reality 节点管理脚本 ---"
+    echo "1. 安装/更新 Xray"
+    echo "2. 添加 VLESS+TCP+Reality 节点"
+    echo "3. 查看所有 VLESS+TCP+Reality 节点信息和链接"
+    echo "4. 删除 VLESS+TCP+Reality 节点"
+    echo "5. 退出"
+    echo "----------------------------------------"
+}
+
+# 主循环
+main() {
+    install_dependencies
+    install_xray # 确保 Xray 始终是最新或已安装
+
+    while true; do
+        show_menu
+        read -p "请选择操作 (1-5): " option
+        case $option in
+            1)
+                install_xray
+                ;;
+            2)
+                add_node
+                ;;
+            3)
+                view_nodes
+                ;;
+            4)
+                delete_node
+                ;;
+            5)
+                echo "退出脚本。"
+                exit 0
+                ;;
+            *)
+                echo "无效的选项，请重新输入。"
+                ;;
+        esac
+        echo "" # 菜单之间空一行
+    done
+}
+
+# 启动脚本
+main
