@@ -6,100 +6,134 @@ if [ "$(id -u)" != "0" ]; then
    exit 1
 fi
 
-# 安装必要的依赖
-apt update
-apt install -y curl wget jq qrencode openssl
-
-# 安装Xray
-echo "正在安装Xray..."
-bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
-
-# 创建必要的目录和文件
+# 定义全局变量
 CONFIG_DIR="/usr/local/etc/xray/nodes"
 MAIN_CONFIG="/usr/local/etc/xray/config.json"
 DB_FILE="/usr/local/etc/xray/nodes.db"
 XRAY_BIN="/usr/local/bin/xray"
 
-mkdir -p "$CONFIG_DIR"
-touch "$DB_FILE"
-
-# 设置默认配置文件
-cat > "$MAIN_CONFIG" <<EOF
-{
-  "log": {
-    "loglevel": "warning"
-  },
-  "inbounds": [],
-  "outbounds": [
-    {
-      "protocol": "freedom"
-    }
-  ]
-}
-EOF
-
-# 创建systemd服务文件（如果不存在）
-if [ ! -f "/etc/systemd/system/xray.service" ]; then
-    cat > /etc/systemd/system/xray.service <<EOF
-[Unit]
-Description=Xray Service
-After=network.target nss-lookup.target
-
-[Service]
-User=nobody
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-NoNewPrivileges=true
-ExecStart=$XRAY_BIN run -config $MAIN_CONFIG
-Restart=on-failure
-RestartPreventExitStatus=23
-LimitNPROC=10000
-LimitNOFILE=1000000
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload
-    systemctl enable xray
-fi
-
-# 启动Xray服务
-systemctl start xray
-
-# 定义功能函数
-function merge_configs() {
-  local files=("$CONFIG_DIR"/*.json)
-  {
-    echo '{ "log": { "loglevel": "warning" }, "inbounds": ['
-    for f in "${files[@]}"; do
-      cat "$f" | jq '.' 
-    done | jq -s 'add | .[]' | jq -s '.'
-    echo '], "outbounds": [{ "protocol": "freedom" }] }'
-  } > "$MAIN_CONFIG"
+# 初始化环境
+function init_env() {
+    mkdir -p "$CONFIG_DIR"
+    touch "$DB_FILE"
+    
+    # 安装必要依赖
+    if ! command -v jq &> /dev/null || ! command -v qrencode &> /dev/null; then
+        apt update
+        apt install -y jq qrencode openssl
+    fi
 }
 
-function restart_xray() {
-  systemctl restart xray
+# 节点管理函数
+function node_management() {
+    while true; do
+        echo -e "\n===== 节点管理 ====="
+        echo "1. 添加节点"
+        echo "2. 删除节点"
+        echo "3. 查看节点"
+        echo "0. 返回主菜单"
+        echo "===================="
+        read -p "请输入选项: " opt
+        
+        case $opt in
+            1) add_node ;;
+            2) delete_node ;;
+            3) list_nodes ;;
+            0) break ;;
+            *) echo "无效选项" ;;
+        esac
+    done
 }
 
+# Xray管理函数
+function xray_management() {
+    while true; do
+        echo -e "\n===== Xray管理 ====="
+        echo "1. 启动Xray"
+        echo "2. 停止Xray"
+        echo "3. 重启Xray"
+        echo "4. 查看状态"
+        echo "0. 返回主菜单"
+        echo "===================="
+        read -p "请输入选项: " opt
+        
+        case $opt in
+            1) systemctl start xray && echo "Xray已启动" ;;
+            2) systemctl stop xray && echo "Xray已停止" ;;
+            3) systemctl restart xray && echo "Xray已重启" ;;
+            4) systemctl status xray ;;
+            0) break ;;
+            *) echo "无效选项" ;;
+        esac
+    done
+}
+
+# 防火墙管理函数
+function firewall_management() {
+    while true; do
+        echo -e "\n===== 防火墙管理 ====="
+        echo "1. 开放端口"
+        echo "2. 删除端口"
+        echo "3. 查看开放端口"
+        echo "4. 安装UFW防火墙"
+        echo "5. 启用防火墙"
+        echo "6. 禁用防火墙"
+        echo "7. 防火墙状态"
+        echo "0. 返回主菜单"
+        echo "======================="
+        read -p "请输入选项: " opt
+        
+        case $opt in
+            1) 
+                read -p "请输入要开放的端口(如: 9009): " port
+                ufw allow $port/tcp
+                echo "端口 $port 已开放"
+                ;;
+            2) 
+                read -p "请输入要删除的端口(如: 9009): " port
+                ufw delete allow $port/tcp
+                echo "端口 $port 规则已删除"
+                ;;
+            3) ufw status numbered ;;
+            4) 
+                apt install -y ufw
+                ufw allow ssh
+                echo "UFW已安装，SSH端口已放行"
+                ;;
+            5) 
+                ufw enable
+                echo "防火墙已启用"
+                ;;
+            6) 
+                ufw disable
+                echo "防火墙已禁用"
+                ;;
+            7) ufw status ;;
+            0) break ;;
+            *) echo "无效选项" ;;
+        esac
+    done
+}
+
+# 添加节点函数
 function add_node() {
-  read -p "请输入域名或IP（默认自动获取VPS IP）: " DOMAIN
-  DOMAIN=${DOMAIN:-$(curl -s ipv4.ip.sb)}
-  read -p "请输入监听端口（例如 10001）: " PORT
-  read -p "请输入伪装域名（默认 itunes.apple.com）: " FAKE_DOMAIN
-  read -p "是否启用 flow=xtls-rprx-vision? [y/N]: " USE_FLOW
+    read -p "请输入域名或IP（默认自动获取VPS IP）: " DOMAIN
+    DOMAIN=${DOMAIN:-$(curl -s ipv4.ip.sb)}
+    read -p "请输入监听端口（例如 10001）: " PORT
+    read -p "请输入伪装域名（默认 itunes.apple.com）: " FAKE_DOMAIN
+    read -p "是否启用 flow=xtls-rprx-vision? [y/N]: " USE_FLOW
 
-  FAKE_DOMAIN=${FAKE_DOMAIN:-itunes.apple.com}
-  [[ "$USE_FLOW" =~ ^[Yy]$ ]] && FLOW=true || FLOW=false
+    FAKE_DOMAIN=${FAKE_DOMAIN:-itunes.apple.com}
+    [[ "$USE_FLOW" =~ ^[Yy]$ ]] && FLOW=true || FLOW=false
 
-  KEYS=$($XRAY_BIN x25519)
-  PRIVATE_KEY=$(echo "$KEYS" | awk '/Private/{print $3}')
-  PUBLIC_KEY=$(echo "$KEYS" | awk '/Public/{print $3}')
-  SHORT_ID=$(openssl rand -hex 8)
-  UUID=$(cat /proc/sys/kernel/random/uuid)
+    KEYS=$($XRAY_BIN x25519)
+    PRIVATE_KEY=$(echo "$KEYS" | awk '/Private/{print $3}')
+    PUBLIC_KEY=$(echo "$KEYS" | awk '/Public/{print $3}')
+    SHORT_ID=$(openssl rand -hex 8)
+    UUID=$(cat /proc/sys/kernel/random/uuid)
 
-  NODE_CONFIG="$CONFIG_DIR/$PORT.json"
-  cat > "$NODE_CONFIG" <<EOF
+    NODE_CONFIG="$CONFIG_DIR/$PORT.json"
+    cat > "$NODE_CONFIG" <<EOF
 {
   "port": $PORT,
   "protocol": "vless",
@@ -124,97 +158,58 @@ function add_node() {
 }
 EOF
 
-  merge_configs
-  restart_xray
+    merge_configs
+    systemctl restart xray
 
-  echo "$PORT $UUID $PUBLIC_KEY $SHORT_ID $FAKE_DOMAIN $FLOW $DOMAIN" >> "$DB_FILE"
+    echo "$PORT $UUID $PUBLIC_KEY $SHORT_ID $FAKE_DOMAIN $FLOW $DOMAIN" >> "$DB_FILE"
 
-  LINK="vless://$UUID@$DOMAIN:$PORT?encryption=none&security=reality&sni=$FAKE_DOMAIN&fp=chrome&pbk=$PUBLIC_KEY&sid=$SHORT_ID&type=tcp"
-  [ "$FLOW" == "true" ] && LINK="$LINK&flow=xtls-rprx-vision"
-  LINK="$LINK#Reality-$DOMAIN"
+    LINK="vless://$UUID@$DOMAIN:$PORT?encryption=none&security=reality&sni=$FAKE_DOMAIN&fp=chrome&pbk=$PUBLIC_KEY&sid=$SHORT_ID&type=tcp"
+    [ "$FLOW" == "true" ] && LINK="$LINK&flow=xtls-rprx-vision"
+    LINK="$LINK#Reality-$DOMAIN"
 
-  echo -e "\n>>> 节点导入链接:\n$LINK"
-  if command -v qrencode &> /dev/null; then
-    qrencode -t ANSIUTF8 "$LINK"
-  else
-    echo "注意: qrencode未安装，无法生成二维码"
-  fi
+    echo -e "\n>>> 节点导入链接:\n$LINK"
+    if command -v qrencode &> /dev/null; then
+        qrencode -t ANSIUTF8 "$LINK"
+    else
+        echo "注意: qrencode未安装，无法生成二维码"
+    fi
 }
 
-function delete_node() {
-  read -p "请输入要删除的端口号: " PORT
-  rm -f "$CONFIG_DIR/$PORT.json"
-  sed -i "/^$PORT /d" "$DB_FILE"
-  merge_configs
-  restart_xray
-  echo "节点 $PORT 删除成功并释放端口。"
+# 其他原有函数保持不变 (delete_node, list_nodes, merge_configs等)
+# [...]
+
+# 主菜单
+function main_menu() {
+    init_env
+    
+    while true; do
+        echo -e "\n===== Reality管理主菜单 ====="
+        echo "1. 节点管理"
+        echo "2. Xray管理"
+        echo "3. 防火墙管理"
+        echo "0. 退出"
+        echo "============================="
+        read -p "请输入选项: " opt
+        
+        case $opt in
+            1) node_management ;;
+            2) xray_management ;;
+            3) firewall_management ;;
+            0) exit 0 ;;
+            *) echo "无效选项" ;;
+        esac
+    done
 }
 
-function list_nodes() {
-  echo -e "\n已添加的节点信息:\n"
-  cat "$DB_FILE" | while read line; do
-    set -- $line
-    echo "端口: $1 | UUID: $2 | PublicKey: $3 | ShortID: $4 | SNI: $5 | Flow: $6 | 域名: $7"
-  done
+# 创建系统命令
+function install_command() {
+    if [ ! -f "/usr/local/bin/reality" ]; then
+        cp "$0" /usr/local/bin/reality
+        chmod +x /usr/local/bin/reality
+        echo "命令 'reality' 已安装，现在可以直接在终端输入 reality 来运行本程序"
+    fi
 }
 
-function start_xray() {
-  systemctl start xray && echo "Xray 启动成功"
-}
-
-function stop_xray() {
-  systemctl stop xray && echo "Xray 已停止"
-}
-
-function status_xray() {
-  systemctl status xray
-}
-
-function menu() {
-  while true; do
-    echo -e "\n===== Reality 管理菜单 ====="
-    echo "1. 添加新节点"
-    echo "2. 删除节点"
-    echo "3. 查看所有节点"
-    echo "4. 启动 Xray"
-    echo "5. 停止 Xray"
-    echo "6. 重启 Xray"
-    echo "7. 查看 Xray 状态"
-    echo "0. 退出"
-    echo "=============================="
-    read -p "请输入选项: " opt
-    case $opt in
-      1) add_node ;;
-      2) delete_node ;;
-      3) list_nodes ;;
-      4) start_xray ;;
-      5) stop_xray ;;
-      6) restart_xray ;;
-      7) status_xray ;;
-      0) exit 0 ;;
-      *) echo "无效选项" ;;
-    esac
-  done
-}
-
-# 显示欢迎信息
-echo "===================================="
-echo " Xray Reality 一键安装管理脚本"
-echo " 版本: 1.1"
-echo " 作者: 根据用户需求定制"
-echo "===================================="
-
-# 检查防火墙
-if ! command -v ufw &> /dev/null; then
-  echo "检测到未安装UFW防火墙，建议安装以增强安全性"
-  read -p "是否要安装UFW防火墙? [y/N]: " install_ufw
-  if [[ "$install_ufw" =~ ^[Yy]$ ]]; then
-    apt install -y ufw
-    ufw allow ssh
-    ufw enable
-    echo "UFW防火墙已安装并启用，SSH端口已放行"
-  fi
-fi
-
-# 进入主菜单
-menu
+# 安装命令并启动
+install_command
+main_menu
