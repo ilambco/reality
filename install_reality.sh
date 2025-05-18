@@ -215,8 +215,8 @@ EOF
 # 主菜单
 show_menu() {
     echo "================ Reality 管理菜单 ================"
-    echo "1. 添加 VLESS+REALITY 节点"
-    echo "2. 删除 VLESS 节点（按端口）"
+    echo "1. 添加 VLESS 节点"
+    echo "2. 删除 VLESS 节点"
     echo "3. 查看 VLESS 节点"
     echo "4. Xray 管理"
     echo "5. 防火墙 管理"
