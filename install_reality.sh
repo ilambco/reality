@@ -1,6 +1,8 @@
 #!/bin/bash
 
 # 依赖：xray、curl、jq、iptables、openssl
+apt update
+apt install -y curl jq iptables iptables-persistent netfilter-persistent openssl unzip
 
 # 必须以 root 运行
 if [[ $EUID -ne 0 ]]; then
