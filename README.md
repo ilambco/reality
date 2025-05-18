@@ -1,6 +1,8 @@
 # 使用方法
 > **免责声明:** 此项目仅供个人学习交流，请不要用于非法目的，请不要在生产环境中使用。
 
+> 更新：自动安装依赖
+
 ```
 wget -O install_reality.sh https://raw.githubusercontent.com/ilambco/reality/refs/heads/main/install_reality.sh && chmod +x install_reality.sh && bash install_reality.sh
 ```
