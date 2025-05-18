@@ -2,6 +2,12 @@
 
 # 依赖：xray、curl、jq、iptables、openssl
 
+# 必须以 root 运行
+if [[ $EUID -ne 0 ]]; then
+   echo "请以 root 用户运行此脚本（使用 sudo 或直接切换为 root）"
+   exit 1
+fi
+
 XRAY_CONFIG_PATH="/usr/local/etc/xray/config.json"
 XRAY_BIN="/usr/local/bin/xray"
 XRAY_SERVICE="xray.service"
