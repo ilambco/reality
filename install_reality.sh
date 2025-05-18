@@ -148,19 +148,19 @@ EOF
     echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&pbk=$PUBKEY&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-$DOMAIN"
 }
 
-# 删除节点（按端口）
 remove_node() {
     echo "现有节点："
     ls $UUID_DIR
-    read -p "请输入要删除的端口号: " DEL_PORT
-    FILE_TO_DELETE=$(find $UUID_DIR -name "*_${DEL_PORT}.json")
+    read -p "请输入要删除的UUID: " DEL_UUID
+    # 查找包含 UUID 的文件
+    FILE_TO_DELETE=$(find $UUID_DIR -type f -name "${DEL_UUID}_*.json")
     if [[ -f "$FILE_TO_DELETE" ]]; then
         rm -f "$FILE_TO_DELETE"
         echo "已删除: $FILE_TO_DELETE"
         generate_config
         systemctl restart $XRAY_SERVICE
     else
-        echo "未找到对应端口的节点"
+        echo "未找到对应UUID的节点"
     fi
 }
 
