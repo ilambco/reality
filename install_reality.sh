@@ -1,8 +1,19 @@
 #!/bin/bash
 
 # 依赖：curl jq iptables iptables-persistent netfilter-persistent openssl unzip
-apt update
-apt install -y curl jq iptables iptables-persistent netfilter-persistent openssl unzip
+DEPS=(curl jq iptables iptables-persistent netfilter-persistent openssl unzip)  
+MISSING=()  
+for PKG in "${DEPS[@]}"; do  
+  dpkg -s "$PKG" &>/dev/null || MISSING+=("$PKG")  
+done  
+
+if [ ${#MISSING[@]} -gt 0 ]; then  
+  echo "检测到缺失依赖：${MISSING[*]}，正在安装…"  
+  apt update  
+  apt install -y "${MISSING[@]}"  
+else  
+  echo "所有依赖已就绪"  
+fi
 
 # 必须以 root 运行
 if [[ $EUID -ne 0 ]]; then
