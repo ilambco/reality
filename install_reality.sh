@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# 依赖：xray、curl、jq、iptables、openssl
+# 依赖：curl jq iptables iptables-persistent netfilter-persistent openssl unzip
 apt update
 apt install -y curl jq iptables iptables-persistent netfilter-persistent openssl unzip
 
