@@ -15,11 +15,6 @@ get_ip() {
     curl -s ipv4.ip.sb || curl -s ifconfig.me || hostname -I | awk '{print $1}'
 }
 
-# 生成 Reality 密钥对
-generate_reality_keys() {
-    $XRAY_BIN x25519
-}
-
 # 安装 Xray
 install_xray() {
     bash <(curl -Ls https://github.com/XTLS/Xray-install/raw/main/install-release.sh) install
@@ -115,7 +110,7 @@ add_node() {
     KEYS=$($XRAY_BIN x25519)
     PRIVKEY=$(echo "$KEYS" | grep Private | awk '{print $3}')
     PUBKEY=$(echo "$KEYS" | grep Public | awk '{print $3}')
-    SHORT_ID=$(openssl rand -hex 8)
+    SHORT_ID=$(openssl rand -hex 2) # 1字节16进制，对应v2rayN中的 sid 参数
 
     CLIENT_FILE="$UUID_DIR/${UUID}_${PORT}.json"
     cat > "$CLIENT_FILE" <<EOF
@@ -136,7 +131,7 @@ EOF
     generate_config
     systemctl restart $XRAY_SERVICE
 
-    echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&flow=xtls-rprx-vision&encryption=none&fp=chrome&pbk=$PUBKEY&sni=$SERVER_NAME#VLESS-REALITY"
+    echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-$PORT"
 }
 
 # 删除节点（按端口）
@@ -165,22 +160,22 @@ view_node() {
         PORT=$(jq -r .port "$file")
         SERVER_NAME=$(jq -r .server_name "$file")
         PUBKEY=$(jq -r .public_key "$file")
+        SHORT_ID=$(jq -r .short_id "$file")
         echo "---"
         echo "端口: $PORT"
         echo "UUID: $UUID"
-        echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&flow=xtls-rprx-vision&encryption=none&fp=chrome&pbk=$PUBKEY&sni=$SERVER_NAME#VLESS-REALITY"
+        echo "Reality 公钥: $PUBKEY"
+        echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-$PORT"
     done
 }
 
 # 生成 Xray 配置文件
 generate_config() {
-    # 默认使用第一个节点的配置作为通用入站设置
-    BASE=$(ls $UUID_DIR/*.json | head -n1)
-    PORT=$(jq -r .port "$BASE")
-    SERVER_NAME=$(jq -r .server_name "$BASE")
-    PRIVKEY=$(jq -r .private_key "$BASE")
+    FIRST=$(ls $UUID_DIR/*.json | head -n1)
+    PORT=$(jq -r .port "$FIRST")
+    SERVER_NAME=$(jq -r .server_name "$FIRST")
+    PRIVKEY=$(jq -r .private_key "$FIRST")
     SHORT_IDS=$(for f in $UUID_DIR/*.json; do jq -r .short_id "$f"; done | jq -R -s -c 'split("\n") | map(select(. != ""))')
-
     CLIENTS=$(for f in $UUID_DIR/*.json; do jq -c '{id: .uuid, flow: "xtls-rprx-vision"}' "$f"; done | jq -s '.')
 
     cat > $XRAY_CONFIG_PATH <<EOF
@@ -220,8 +215,8 @@ EOF
 # 主菜单
 show_menu() {
     echo "================ Reality 管理菜单 ================"
-    echo "1. 添加 VLESS 节点"
-    echo "2. 删除 VLESS 节点"
+    echo "1. 添加 VLESS+REALITY 节点"
+    echo "2. 删除 VLESS 节点（按端口）"
     echo "3. 查看 VLESS 节点"
     echo "4. Xray 管理"
     echo "5. 防火墙 管理"
