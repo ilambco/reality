@@ -165,7 +165,7 @@ view_node() {
         echo "端口: $PORT"
         echo "UUID: $UUID"
         echo "Reality 公钥: $PUBKEY"
-        echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-$PORT"
+        echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&pbk=$PUBKEY&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-$PORT"
     done
 }
 
