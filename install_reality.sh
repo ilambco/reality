@@ -1,5 +1,18 @@
 #!/bin/bash
 
+# 必须以 root 运行
+if [[ $EUID -ne 0 ]]; then
+   echo "请以 root 用户运行此脚本（使用 sudo 或直接切换为 root）"
+   exit 1
+fi
+
+XRAY_CONFIG_PATH="/usr/local/etc/xray/config.json"
+XRAY_BIN="/usr/local/bin/xray"
+XRAY_SERVICE="xray.service"
+UUID_DIR="/usr/local/etc/xray/clients"
+
+mkdir -p $UUID_DIR
+
 # 依赖：curl jq iptables iptables-persistent netfilter-persistent openssl unzip
 DEPS=(curl jq iptables iptables-persistent netfilter-persistent openssl unzip)  
 MISSING=()  
@@ -14,19 +27,6 @@ if [ ${#MISSING[@]} -gt 0 ]; then
 else  
   echo "所有依赖已就绪"  
 fi
-
-# 必须以 root 运行
-if [[ $EUID -ne 0 ]]; then
-   echo "请以 root 用户运行此脚本（使用 sudo 或直接切换为 root）"
-   exit 1
-fi
-
-XRAY_CONFIG_PATH="/usr/local/etc/xray/config.json"
-XRAY_BIN="/usr/local/bin/xray"
-XRAY_SERVICE="xray.service"
-UUID_DIR="/usr/local/etc/xray/clients"
-
-mkdir -p $UUID_DIR
 
 # 获取公网 IP
 get_ip() {
@@ -121,6 +121,8 @@ disable_bbr() {
     sysctl -p
     echo "BBR 配置已移除"
 }
+
+mkdir -p "$UUID_DIR"
 
 # 添加 VLESS+REALITY 节点
 add_node() {
