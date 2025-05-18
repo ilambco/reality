@@ -6,26 +6,27 @@ if [[ $EUID -ne 0 ]]; then
    exit 1
 fi
 
+# 全局变量
 XRAY_CONFIG_PATH="/usr/local/etc/xray/config.json"
 XRAY_BIN="/usr/local/bin/xray"
 XRAY_SERVICE="xray.service"
 UUID_DIR="/usr/local/etc/xray/clients"
 
-mkdir -p $UUID_DIR
+# 一次性创建目录 
+mkdir -p "$UUID_DIR"
 
 # 依赖：curl jq iptables iptables-persistent netfilter-persistent openssl unzip
-DEPS=(curl jq iptables iptables-persistent netfilter-persistent openssl unzip)  
-MISSING=()  
-for PKG in "${DEPS[@]}"; do  
-  dpkg -s "$PKG" &>/dev/null || MISSING+=("$PKG")  
-done  
-
-if [ ${#MISSING[@]} -gt 0 ]; then  
-  echo "检测到缺失依赖：${MISSING[*]}，正在安装…"  
-  apt update  
-  apt install -y "${MISSING[@]}"  
-else  
-  echo "所有依赖已就绪"  
+DEPS=(curl jq iptables iptables-persistent netfilter-persistent openssl unzip)
+MISSING=()
+for PKG in "${DEPS[@]}"; do
+  dpkg -s "$PKG" &>/dev/null || MISSING+=("$PKG")
+done
+if [ ${#MISSING[@]} -gt 0 ]; then
+  echo "检测到缺失依赖：${MISSING[*]}，正在安装…"
+  apt update
+  apt install -y "${MISSING[@]}"
+else
+  echo "所有依赖已就绪"
 fi
 
 # 获取公网 IP
@@ -122,10 +123,9 @@ disable_bbr() {
     echo "BBR 配置已移除"
 }
 
-mkdir -p "$UUID_DIR"
-
 # 添加 VLESS+REALITY 节点
 add_node() {
+    mkdir -p "$UUID_DIR"
     read -p "请输入域名或IP（默认使用本机IP）:" DOMAIN
     DOMAIN=${DOMAIN:-$(get_ip)}
 
