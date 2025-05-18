@@ -264,7 +264,7 @@ delete_script() {
 # 主菜单
 show_menu() {
     echo " ================================================== "
-    echo " 警告：请先安装Xray再去添加vless节点"
+    echo " 警告：请先安装Xray和开放端口后，再去添加vless节点"
     echo " 介绍：一键安装vless+tcp+reality"
     echo " 系统：Ubuntu、Debian                        "
     echo " ================================================== "
@@ -273,9 +273,9 @@ show_menu() {
     echo " 1. 添加 VLESS 节点"
     echo " 2. 删除 VLESS 节点"
     echo " 3. 查看 VLESS 节点"
-    echo " 4. Xray 管理"
-    echo " 5. 防火墙 管理"
-    echo " 6. BBR 管理"
+    echo " 4. Xray   管理"
+    echo " 5. UFW    管理"
+    echo " 6. BBR    管理"
     echo " 7. 删除此脚本"
     echo " 0. 退出"
     echo " =================================================="
@@ -304,9 +304,9 @@ xray_menu() {
 firewall_menu() {
     echo "--- 防火墙管理 ---"
     echo "1. 安装"
-    echo "2. 启动规则"
-    echo "3. 停止规则"
-    echo "4. 添加开放端口"
+    echo "2. 开启"
+    echo "3. 关闭"
+    echo "4. 开放端口"
     echo "5. 查看规则"
     read -p "请选择: " sub
     case $sub in
