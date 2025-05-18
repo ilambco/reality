@@ -1,6 +1,5 @@
 #!/bin/bash
 
-# Reality+VLESS 安装管理脚本 by ChatGPT
 # 依赖：xray、curl、jq、iptables、openssl
 
 XRAY_CONFIG_PATH="/usr/local/etc/xray/config.json"
@@ -232,18 +231,19 @@ EOF
 EOF
 }
 
-# 删除脚本本体
+# 删除脚本本体和快捷方式
 delete_script() {
-    echo "即将删除脚本本体 $0 ..."
-    rm -- "$0"
-    echo "脚本已删除"
+    echo "即将删除脚本和快捷指令..."
+    rm -f /root/install_reality.sh
+    rm -f /usr/local/bin/lamb
+    echo "脚本和 lamb 快捷方式已删除"
     exit
 }
 
 # 主菜单
 show_menu() {
     echo "================ Reality 管理菜单 ================"
-    echo "1. 添加 VLESS 节点9009"
+    echo "1. 添加 VLESS 节点"
     echo "2. 删除 VLESS 节点"
     echo "3. 查看 VLESS 节点"
     echo "4. Xray 管理"
