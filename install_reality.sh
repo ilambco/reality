@@ -245,21 +245,6 @@ show_menu() {
     echo "=================================================="
 }
 
-# 主循环
-after show_menu:
-read -p "请输入选项: " choice
-case $choice in
-    1) add_node;;
-    2) remove_node;;
-    3) view_node;;
-    4) xray_menu;;
-    5) firewall_menu;;
-    6) bbr_menu;;
-    7) delete_self;;
-    0) exit;;
-    *) echo "无效选项，请重新输入";;
-esac
-
 # 子菜单：Xray
 xray_menu() {
     echo "--- Xray 管理 ---"
@@ -312,6 +297,28 @@ bbr_menu() {
         *) echo "无效选项";;
     esac
 }
+
+# 创建快捷指令 lamb
+if [[ ! -f /usr/local/bin/lamb ]]; then
+    ln -s "$PWD/$0" /usr/local/bin/lamb
+    chmod +x /usr/local/bin/lamb
+    echo "已创建快捷指令：lamb"
+fi
+
+# 主循环
+after show_menu:
+read -p "请输入选项: " choice
+case $choice in
+    1) add_node;;
+    2) remove_node;;
+    3) view_node;;
+    4) xray_menu;;
+    5) firewall_menu;;
+    6) bbr_menu;;
+    7) delete_self;;
+    0) exit;;
+    *) echo "无效选项，请重新输入";;
+esac
 
     echo ""
 done
