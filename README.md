@@ -11,4 +11,4 @@ wget -O install_reality.sh https://raw.githubusercontent.com/ilambco/reality/ref
 
 后续可使用快捷指令`lamb`打开菜单
 
-![界面]([https://raw.githubusercontent.com/ilambco/reality/ee10e80023c8de402be31a70b12c152b402d0515/jiemian.png)])
+![界面](https://raw.githubusercontent.com/ilambco/reality/ee10e80023c8de402be31a70b12c152b402d0515/jiemian.png)
