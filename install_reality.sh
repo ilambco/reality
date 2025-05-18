@@ -131,7 +131,7 @@ EOF
     generate_config
     systemctl restart $XRAY_SERVICE
 
-    echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&pbk=$PUBKEY&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-$DOMAIN:$PORT"
+    echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&pbk=$PUBKEY&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-$DOMAIN"
 }
 
 # 删除节点（按端口）
@@ -215,7 +215,7 @@ EOF
 # 主菜单
 show_menu() {
     echo "================ Reality 管理菜单 ================"
-    echo "1. 添加 VLESS 节点"
+    echo "1. 添加 VLESS 节点DOMAIN"
     echo "2. 删除 VLESS 节点"
     echo "3. 查看 VLESS 节点"
     echo "4. Xray 管理"
