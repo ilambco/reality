@@ -32,6 +32,11 @@ stop_xray() {
     echo "Xray 已停止"
 }
 
+# 查看 Xray 状态
+status_xray() {
+    systemctl status $XRAY_SERVICE
+}
+
 # 卸载 Xray
 uninstall_xray() {
     systemctl stop $XRAY_SERVICE
@@ -40,11 +45,6 @@ uninstall_xray() {
     rm -rf /usr/local/etc/xray /usr/local/bin/xray
     systemctl daemon-reload
     echo "Xray 已卸载完成"
-}
-
-# 查看 Xray 状态
-status_xray() {
-    systemctl status $XRAY_SERVICE
 }
 
 # 安装防火墙（iptables-persistent）
@@ -103,6 +103,15 @@ disable_bbr() {
     sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
     sysctl -p
     echo "BBR 配置已移除"
+}
+
+# 删除本脚本
+delete_self() {
+    SCRIPT_PATH=$(realpath "$0")
+    echo "即将删除脚本文件: $SCRIPT_PATH"
+    rm -f "$SCRIPT_PATH"
+    echo "脚本已删除。"
+    exit
 }
 
 # 添加 VLESS+REALITY 节点
@@ -177,15 +186,6 @@ view_node() {
         echo "Reality 公钥: $PUBKEY"
         echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&pbk=$PUBKEY&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-$PORT"
     done
-}
-
-# 删除本脚本
-delete_self() {
-    SCRIPT_PATH=$(realpath "$0")
-    echo "即将删除脚本文件: $SCRIPT_PATH"
-    rm -f "$SCRIPT_PATH"
-    echo "脚本已删除。"
-    exit
 }
 
 # 生成 Xray 配置文件
@@ -306,19 +306,19 @@ if [[ ! -f /usr/local/bin/lamb ]]; then
 fi
 
 # 主循环
-after show_menu:
-read -p "请输入选项: " choice
-case $choice in
-    1) add_node;;
-    2) remove_node;;
-    3) view_node;;
-    4) xray_menu;;
-    5) firewall_menu;;
-    6) bbr_menu;;
-    7) delete_self;;
-    0) exit;;
-    *) echo "无效选项，请重新输入";;
-esac
-
+while true; do
+    show_menu
+    read -p "请输入选项: " choice
+    case $choice in
+        1) add_node;;
+        2) remove_node;;
+        3) view_node;;
+        4) xray_menu;;
+        5) firewall_menu;;
+        6) bbr_menu;;
+        7) delete_script;;
+        0) exit;;
+        *) echo "无效选项，请重新输入";;
+    esac
     echo ""
 done
