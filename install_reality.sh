@@ -1,211 +1,208 @@
 #!/bin/bash
 
-# ========= 自定义参数 =========
-XRAY_CONFIG_PATH="/usr/local/etc/xray"
-XRAY_BIN_PATH="/usr/local/bin/xray"
-XRAY_SERVICE_PATH="/etc/systemd/system/xray.service"
-MANAGER_CMD="/usr/local/bin/reality-manager"
+XRAY_CONFIG_PATH="/usr/local/etc/xray/config.json"
+XRAY_BIN="/usr/local/bin/xray"
+XRAY_SERVICE="xray.service"
+UUID_DIR="/usr/local/etc/xray/clients"
 
-# ========= 安装部分 =========
-read -p "请输入用于连接的域名或IP（默认自动获取VPS IP）: " DOMAIN
-[ -z "$DOMAIN" ] && DOMAIN=$(curl -s ipv4.ip.sb || curl -s ifconfig.me)
+mkdir -p $UUID_DIR
 
-read -p "请输入监听端口（默认 443）: " PORT
-[ -z "$PORT" ] && PORT=443
+# 获取公网 IP
+get_ip() {
+    curl -s ipv4.ip.sb || curl -s ifconfig.me || hostname -I | awk '{print $1}'
+}
 
-read -p "请输入伪装域名（默认 itunes.apple.com）: " FAKE_DOMAIN
-[ -z "$FAKE_DOMAIN" ] && FAKE_DOMAIN="itunes.apple.com"
+# 安装 Xray
+install_xray() {
+    bash <(curl -Ls https://github.com/XTLS/Xray-install/raw/main/install-release.sh) install
+}
 
-UUID=$(cat /proc/sys/kernel/random/uuid)
+# 安装防火墙
+install_firewall() {
+    apt update && apt install -y iptables-persistent
+    echo "防火墙已安装"
+}
 
-echo -e "\n>>> 安装 Xray-core 最新版本..."
-mkdir -p $XRAY_CONFIG_PATH
-mkdir -p /usr/local/bin
-curl -Lo /tmp/Xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
-unzip -o /tmp/Xray.zip -d /usr/local/bin
-chmod +x /usr/local/bin/xray
+# 启动防火墙
+start_firewall() {
+    iptables -A INPUT -p tcp --dport 443 -j ACCEPT
+    netfilter-persistent save
+    echo "防火墙规则已启用"
+}
 
-echo -e "\n>>> 生成 Reality 密钥对..."
-KEY_OUTPUT=$($XRAY_BIN_PATH x25519)
-PRIVATE_KEY=$(echo "$KEY_OUTPUT" | grep 'Private' | awk '{print $3}')
-PUBLIC_KEY=$(echo "$KEY_OUTPUT" | grep 'Public' | awk '{print $3}')
-SHORT_ID=$(openssl rand -hex 8)
+# 停止防火墙
+stop_firewall() {
+    iptables -F
+    netfilter-persistent save
+    echo "防火墙规则已清空"
+}
 
-cat > $XRAY_CONFIG_PATH/config.json <<EOF
+# 安装 BBR
+install_bbr() {
+    modprobe tcp_bbr
+    echo "tcp_bbr" | tee -a /etc/modules-load.d/modules.conf
+    echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    sysctl -p
+    echo "BBR 已启用"
+}
+
+# 添加 VLESS+REALITY 节点
+add_node() {
+    read -p "请输入域名或IP（默认使用本机IP）：" DOMAIN
+    DOMAIN=${DOMAIN:-$(get_ip)}
+
+    read -p "请输入端口（默认443）: " PORT
+    PORT=${PORT:-443}
+
+    read -p "请输入伪装域名（默认itunes.apple.com）: " SERVER_NAME
+    SERVER_NAME=${SERVER_NAME:-itunes.apple.com}
+
+    UUID=$(xray uuid)
+    PRIVKEY=$(xray x25519 | grep Private | awk '{print $3}')
+    PUBKEY=$(xray x25519 | grep Public | awk '{print $3}')
+    SHORT_ID=$(openssl rand -hex 8)
+
+    CLIENT_FILE="$UUID_DIR/$UUID.json"
+    cat > "$CLIENT_FILE" <<EOF
 {
-  "inbounds": [{
-    "port": $PORT,
-    "protocol": "vless",
-    "settings": {
-      "clients": [
-        {
-          "id": "$UUID",
-          "flow": "xtls-rprx-vision"
+  "uuid": "$UUID",
+  "port": $PORT,
+  "domain": "$DOMAIN",
+  "server_name": "$SERVER_NAME",
+  "private_key": "$PRIVKEY",
+  "public_key": "$PUBKEY",
+  "short_id": "$SHORT_ID"
+}
+EOF
+
+    echo "节点已添加，UUID: $UUID"
+    echo "Reality 公钥: $PUBKEY"
+
+    generate_config
+    systemctl restart $XRAY_SERVICE
+
+    echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&flow=xtls-rprx-vision&encryption=none&fp=chrome&pbk=$PUBKEY&sni=$SERVER_NAME#VLESS-REALITY"
+}
+
+# 删除节点
+remove_node() {
+    echo "现有节点列表："
+    ls $UUID_DIR
+    read -p "请输入要删除的UUID: " DEL_UUID
+    rm -f "$UUID_DIR/$DEL_UUID.json"
+    generate_config
+    systemctl restart $XRAY_SERVICE
+    echo "节点 $DEL_UUID 已删除"
+}
+
+# 查看节点
+view_node() {
+    for file in $UUID_DIR/*.json; do
+        [ -e "$file" ] || continue
+        UUID=$(jq -r .uuid "$file")
+        DOMAIN=$(jq -r .domain "$file")
+        PORT=$(jq -r .port "$file")
+        SERVER_NAME=$(jq -r .server_name "$file")
+        PUBKEY=$(jq -r .public_key "$file")
+        echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&flow=xtls-rprx-vision&encryption=none&fp=chrome&pbk=$PUBKEY&sni=$SERVER_NAME#VLESS-REALITY"
+    done
+}
+
+# 生成 config.json
+generate_config() {
+    PORT=$(jq -r .port $(ls $UUID_DIR/*.json | head -n1))
+    SERVER_NAME=$(jq -r .server_name $(ls $UUID_DIR/*.json | head -n1))
+    PRIVKEY=$(jq -r .private_key $(ls $UUID_DIR/*.json | head -n1))
+    SHORT_ID=$(jq -r .short_id $(ls $UUID_DIR/*.json | head -n1))
+
+    CLIENTS="$(for f in $UUID_DIR/*.json; do jq -c '{id: .uuid, flow: "xtls-rprx-vision"}' "$f"; done | jq -s '.')"
+    SERVER_NAMES="[\"$SERVER_NAME\"]"
+
+    cat > $XRAY_CONFIG_PATH <<EOF
+{
+  "inbounds": [
+    {
+      "port": $PORT,
+      "protocol": "vless",
+      "settings": {
+        "clients": $CLIENTS,
+        "decryption": "none",
+        "fallbacks": []
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "$SERVER_NAME:443",
+          "xver": 0,
+          "serverNames": $SERVER_NAMES,
+          "privateKey": "$PRIVKEY",
+          "shortIds": ["$SHORT_ID"]
         }
-      ],
-      "decryption": "none"
-    },
-    "streamSettings": {
-      "network": "tcp",
-      "security": "reality",
-      "realitySettings": {
-        "show": false,
-        "dest": "$FAKE_DOMAIN:443",
-        "xver": 0,
-        "serverNames": [
-          "$FAKE_DOMAIN"
-        ],
-        "privateKey": "$PRIVATE_KEY",
-        "shortIds": [
-          "$SHORT_ID"
-        ]
       }
     }
-  }],
-  "outbounds": [{
-    "protocol": "freedom",
-    "settings": {}
-  }]
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom"
+    }
+  ]
 }
 EOF
-
-cat > $XRAY_SERVICE_PATH <<EOF
-[Unit]
-Description=Xray Service
-After=network.target
-
-[Service]
-ExecStart=$XRAY_BIN_PATH run -config $XRAY_CONFIG_PATH/config.json
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl daemon-reexec
-systemctl daemon-reload
-systemctl enable xray
-systemctl restart xray
-
-VLESS_URI="vless://$UUID@$DOMAIN:$PORT?encryption=none&security=reality&sni=$FAKE_DOMAIN&fp=chrome&pbk=$PUBLIC_KEY&sid=$SHORT_ID&type=tcp&flow=xtls-rprx-vision#Reality-$DOMAIN"
-
-echo "$PORT|$UUID|$PUBLIC_KEY|$SHORT_ID|$FAKE_DOMAIN" >> /usr/local/etc/xray/clients.txt
-
-cat > $MANAGER_CMD <<'EOF'
-#!/bin/bash
-
-CONFIG="/usr/local/etc/xray/config.json"
-SERVICE="xray"
-CLIENT_DB="/usr/local/etc/xray/clients.txt"
-
-function menu() {
-  clear
-  echo "=============== Reality 管理脚本 ==============="
-  echo "1. 添加新节点"
-  echo "2. 删除节点（按端口）"
-  echo "3. 查看所有节点链接"
-  echo "4. Xray 服务管理"
-  echo "5. 切换 Reality flow 设置"
-  echo "0. 退出"
-  echo "=============================================="
-  read -p "请输入选项: " option
-
-  case $option in
-    1) add_client;;
-    2) delete_client;;
-    3) show_links;;
-    4) xray_menu;;
-    5) toggle_flow;;
-    0) exit;;
-    *) echo "无效选项"; sleep 1; menu;;
-  esac
 }
 
-function add_client() {
-  read -p "端口: " port
-  read -p "伪装域名: " fake
-  uuid=$(cat /proc/sys/kernel/random/uuid)
-  pub=$(jq -r ".inbounds[0].streamSettings.realitySettings.privateKey" $CONFIG | xray x25519 -i | grep Public | awk '{print $3}')
-  sid=$(openssl rand -hex 8)
-  jq ".inbounds[0].port = $port | .inbounds[0].settings.clients = [{\"id\": \"$uuid\", \"flow\": \"xtls-rprx-vision\"}] | .inbounds[0].streamSettings.realitySettings.dest=\"$fake:443\" | .inbounds[0].streamSettings.realitySettings.serverNames=[\"$fake\"] | .inbounds[0].streamSettings.realitySettings.shortIds=[\"$sid\"]" $CONFIG > tmp && mv tmp $CONFIG
-  echo "$port|$uuid|$pub|$sid|$fake" >> $CLIENT_DB
-  systemctl restart $SERVICE
-  echo "✅ 节点已添加"
-  echo "vless://$uuid@your.domain:$port?encryption=none&security=reality&sni=$fake&fp=chrome&pbk=$pub&sid=$sid&type=tcp&flow=xtls-rprx-vision#Reality-your.domain"
-  read -p "按回车返回..." _
-  menu
+# 管理 Xray 服务
+start_xray() {
+    systemctl start $XRAY_SERVICE
+    echo "Xray 已启动"
 }
 
-function delete_client() {
-  read -p "请输入要删除的端口: " port
-  sed -i "/^$port|/d" $CLIENT_DB
-  echo "❌ 已从记录中移除节点（请手动检查配置文件）"
-  read -p "按回车返回..." _
-  menu
+stop_xray() {
+    systemctl stop $XRAY_SERVICE
+    echo "Xray 已停止"
 }
 
-function show_links() {
-  echo "========== 所有 Reality 节点链接 =========="
-  while IFS='|' read -r port uuid pub sid fake; do
-    echo "vless://$uuid@your.domain:$port?encryption=none&security=reality&sni=$fake&fp=chrome&pbk=$pub&sid=$sid&type=tcp&flow=xtls-rprx-vision#Reality-your.domain"
-  done < $CLIENT_DB
-  read -p "按回车返回..." _
-  menu
+status_xray() {
+    systemctl status $XRAY_SERVICE
 }
 
-function xray_menu() {
-  echo "========== Xray 服务管理 =========="
-  echo "1. 启动 Xray"
-  echo "2. 停止 Xray"
-  echo "3. 重启 Xray"
-  echo "4. 查看状态"
-  echo "0. 返回上级菜单"
-  read -p "请选择: " sub
-
-  case $sub in
-    1) systemctl start $SERVICE && echo "✅ 已启动 Xray";;
-    2) systemctl stop $SERVICE && echo "🛑 已停止 Xray";;
-    3) systemctl restart $SERVICE && echo "🔄 已重启 Xray";;
-    4) systemctl status $SERVICE;;
-    0) menu;;
-    *) echo "无效选项"; sleep 1; xray_menu;;
-  esac
-  read -p "按回车返回..." _
-  xray_menu
+# 主菜单
+show_menu() {
+    echo "========= Reality 管理脚本 ========="
+    echo "1. 安装 Xray"
+    echo "2. 添加 VLESS+REALITY 节点"
+    echo "3. 删除节点"
+    echo "4. 查看节点"
+    echo "5. 启动 Xray"
+    echo "6. 停止 Xray"
+    echo "7. 查看 Xray 状态"
+    echo "8. 安装防火墙"
+    echo "9. 启动防火墙"
+    echo "10. 停止防火墙"
+    echo "11. 安装/启用 BBR"
+    echo "0. 退出"
+    echo "===================================="
 }
 
-function toggle_flow() {
-  current=$(jq -r ".inbounds[0].settings.clients[0].flow" $CONFIG)
-  if [[ "$current" == "xtls-rprx-vision" ]]; then
-    new=""
-    echo "🧩 当前为：xtls-rprx-vision -> 将切换为：空"
-  else
-    new="xtls-rprx-vision"
-    echo "🧩 当前为空 -> 将切换为：xtls-rprx-vision"
-  fi
-  jq ".inbounds[0].settings.clients[0].flow = \"$new\"" $CONFIG > tmp.json && mv tmp.json $CONFIG
-  systemctl restart $SERVICE
-  echo "✅ Flow 已切换为: ${new:-空}"
-  read -p "按回车返回..." _
-  menu
-}
-
-menu
-EOF
-
-chmod +x $MANAGER_CMD
-
-# ===== 输出连接信息 =====
-echo -e "\n================ Reality 节点部署成功 ================"
-echo -e "协议: VLESS + TCP + Reality"
-echo -e "地址: $DOMAIN"
-echo -e "端口: $PORT"
-echo -e "UUID: $UUID"
-echo -e "PublicKey: $PUBLIC_KEY"
-echo -e "ShortID: $SHORT_ID"
-echo -e "伪装域名: $FAKE_DOMAIN"
-echo -e "Reality 指纹: chrome"
-echo -e "\n>>> 节点导入链接如下（v2rayN/v2rayNG 直接导入）:"
-echo -e "$VLESS_URI"
-echo -e "\n>>> 后续可运行 reality-manager 管理节点和服务"
-echo -e "======================================================"
+while true; do
+    show_menu
+    read -p "请输入选项: " choice
+    case $choice in
+        1) install_xray;;
+        2) add_node;;
+        3) remove_node;;
+        4) view_node;;
+        5) start_xray;;
+        6) stop_xray;;
+        7) status_xray;;
+        8) install_firewall;;
+        9) start_firewall;;
+        10) stop_firewall;;
+        11) install_bbr;;
+        0) exit;;
+        *) echo "无效选项，请重新输入";;
+    esac
+    echo ""
+done
