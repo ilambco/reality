@@ -178,40 +178,51 @@ view_node() {
     done
 }
 
-# 生成 Xray 配置文件
+# ✅ 支持多个端口节点，生成多个 inbounds 配置项
 generate_config() {
-    FIRST=$(ls $UUID_DIR/*.json | head -n1)
-    PORT=$(jq -r .port "$FIRST")
-    SERVER_NAME=$(jq -r .server_name "$FIRST")
-    PRIVKEY=$(jq -r .private_key "$FIRST")
-    SHORT_IDS=$(for f in $UUID_DIR/*.json; do jq -r .short_id "$f"; done | jq -R -s -c 'split("\n") | map(select(. != ""))')
-    CLIENTS=$(for f in $UUID_DIR/*.json; do jq -c '{id: .uuid, flow: "xtls-rprx-vision"}' "$f"; done | jq -s '.')
+    INBOUNDS="[]"
+    for file in $UUID_DIR/*.json; do
+        [ -f "$file" ] || continue
+        UUID=$(jq -r .uuid "$file")
+        PORT=$(jq -r .port "$file")
+        SERVER_NAME=$(jq -r .server_name "$file")
+        PRIVKEY=$(jq -r .private_key "$file")
+        SHORT_ID=$(jq -r .short_id "$file")
+        PUBKEY=$(jq -r .public_key "$file")
+        SHORT_IDS="[\"$SHORT_ID\"]"
+        CLIENT="[{\"id\": \"$UUID\", \"flow\": \"xtls-rprx-vision\"}]"
 
+        INBOUND=$(cat <<EOF
+{
+  "port": $PORT,
+  "protocol": "vless",
+  "settings": {
+    "clients": $CLIENT,
+    "decryption": "none",
+    "fallbacks": []
+  },
+  "streamSettings": {
+    "network": "tcp",
+    "security": "reality",
+    "realitySettings": {
+      "show": false,
+      "dest": "$SERVER_NAME:443",
+      "xver": 0,
+      "serverNames": ["$SERVER_NAME"],
+      "privateKey": "$PRIVKEY",
+      "shortIds": $SHORT_IDS
+    }
+  }
+}
+EOF
+)
+        INBOUNDS=$(echo "$INBOUNDS" | jq ". + [$INBOUND]")
+    done
+
+    # 写入配置文件
     cat > $XRAY_CONFIG_PATH <<EOF
 {
-  "inbounds": [
-    {
-      "port": $PORT,
-      "protocol": "vless",
-      "settings": {
-        "clients": $CLIENTS,
-        "decryption": "none",
-        "fallbacks": []
-      },
-      "streamSettings": {
-        "network": "tcp",
-        "security": "reality",
-        "realitySettings": {
-          "show": false,
-          "dest": "$SERVER_NAME:443",
-          "xver": 0,
-          "serverNames": ["$SERVER_NAME"],
-          "privateKey": "$PRIVKEY",
-          "shortIds": $SHORT_IDS
-        }
-      }
-    }
-  ],
+  "inbounds": $INBOUNDS,
   "outbounds": [
     {
       "protocol": "freedom"
@@ -223,7 +234,7 @@ EOF
 
 # 删除脚本本体
 delete_script() {
-    echo "即将删除此脚本 $0 ..."
+    echo "即将删除脚本本体 $0 ..."
     rm -- "$0"
     echo "脚本已删除"
     exit
