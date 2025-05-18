@@ -41,10 +41,9 @@ status_xray() {
 uninstall_xray() {
     systemctl stop $XRAY_SERVICE
     systemctl disable $XRAY_SERVICE
-    rm -f /etc/systemd/system/$XRAY_SERVICE
-    rm -rf /usr/local/etc/xray /usr/local/bin/xray
+    rm -rf /usr/local/bin/xray /usr/local/etc/xray /etc/systemd/system/xray.service
     systemctl daemon-reload
-    echo "Xray 已卸载完成"
+    echo "Xray 已卸载"
 }
 
 # 安装防火墙（iptables-persistent）
@@ -105,18 +104,9 @@ disable_bbr() {
     echo "BBR 配置已移除"
 }
 
-# 删除本脚本
-delete_self() {
-    SCRIPT_PATH=$(realpath "$0")
-    echo "即将删除脚本文件: $SCRIPT_PATH"
-    rm -f "$SCRIPT_PATH"
-    echo "脚本已删除。"
-    exit
-}
-
 # 添加 VLESS+REALITY 节点
 add_node() {
-    read -p "请输入域名或IP（默认使用本机IP）：" DOMAIN
+    read -p "请输入域名或IP（默认使用本机IP）:" DOMAIN
     DOMAIN=${DOMAIN:-$(get_ip)}
 
     read -p "请输入端口（默认443）: " PORT
@@ -129,7 +119,7 @@ add_node() {
     KEYS=$($XRAY_BIN x25519)
     PRIVKEY=$(echo "$KEYS" | grep Private | awk '{print $3}')
     PUBKEY=$(echo "$KEYS" | grep Public | awk '{print $3}')
-    SHORT_ID=$(openssl rand -hex 2) # 1字节16进制，对应v2rayN中的 sid 参数
+    SHORT_ID=$(openssl rand -hex 2)
 
     CLIENT_FILE="$UUID_DIR/${UUID}_${PORT}.json"
     cat > "$CLIENT_FILE" <<EOF
@@ -231,10 +221,18 @@ generate_config() {
 EOF
 }
 
+# 删除脚本本体
+delete_script() {
+    echo "即将删除此脚本 $0 ..."
+    rm -- "$0"
+    echo "脚本已删除"
+    exit
+}
+
 # 主菜单
 show_menu() {
     echo "================ Reality 管理菜单 ================"
-    echo "1. 添加 VLESS 节点DOMAIN"
+    echo "1. 添加 VLESS 节点"
     echo "2. 删除 VLESS 节点"
     echo "3. 查看 VLESS 节点"
     echo "4. Xray 管理"
@@ -252,7 +250,7 @@ xray_menu() {
     echo "2. 启动"
     echo "3. 停止"
     echo "4. 查看状态"
-    echo "5. 卸载 Xray"
+    echo "5. 卸载"
     read -p "请选择: " sub
     case $sub in
         1) install_xray;;
