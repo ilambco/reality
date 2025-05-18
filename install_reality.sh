@@ -32,6 +32,16 @@ stop_xray() {
     echo "Xray 已停止"
 }
 
+# 卸载 Xray
+uninstall_xray() {
+    systemctl stop $XRAY_SERVICE
+    systemctl disable $XRAY_SERVICE
+    rm -f /etc/systemd/system/$XRAY_SERVICE
+    rm -rf /usr/local/etc/xray /usr/local/bin/xray
+    systemctl daemon-reload
+    echo "Xray 已卸载完成"
+}
+
 # 查看 Xray 状态
 status_xray() {
     systemctl status $XRAY_SERVICE
@@ -169,6 +179,15 @@ view_node() {
     done
 }
 
+# 删除本脚本
+delete_self() {
+    SCRIPT_PATH=$(realpath "$0")
+    echo "即将删除脚本文件: $SCRIPT_PATH"
+    rm -f "$SCRIPT_PATH"
+    echo "脚本已删除。"
+    exit
+}
+
 # 生成 Xray 配置文件
 generate_config() {
     FIRST=$(ls $UUID_DIR/*.json | head -n1)
@@ -221,9 +240,25 @@ show_menu() {
     echo "4. Xray 管理"
     echo "5. 防火墙 管理"
     echo "6. BBR 管理"
+    echo "7. 删除此脚本"
     echo "0. 退出"
     echo "=================================================="
 }
+
+# 主循环
+after show_menu:
+read -p "请输入选项: " choice
+case $choice in
+    1) add_node;;
+    2) remove_node;;
+    3) view_node;;
+    4) xray_menu;;
+    5) firewall_menu;;
+    6) bbr_menu;;
+    7) delete_self;;
+    0) exit;;
+    *) echo "无效选项，请重新输入";;
+esac
 
 # 子菜单：Xray
 xray_menu() {
@@ -232,12 +267,14 @@ xray_menu() {
     echo "2. 启动"
     echo "3. 停止"
     echo "4. 查看状态"
+    echo "5. 卸载 Xray"
     read -p "请选择: " sub
     case $sub in
         1) install_xray;;
         2) start_xray;;
         3) stop_xray;;
         4) status_xray;;
+        5) uninstall_xray;;
         *) echo "无效选项";;
     esac
 }
@@ -276,19 +313,5 @@ bbr_menu() {
     esac
 }
 
-# 主循环
-while true; do
-    show_menu
-    read -p "请输入选项: " choice
-    case $choice in
-        1) add_node;;
-        2) remove_node;;
-        3) view_node;;
-        4) xray_menu;;
-        5) firewall_menu;;
-        6) bbr_menu;;
-        0) exit;;
-        *) echo "无效选项，请重新输入";;
-    esac
     echo ""
 done
