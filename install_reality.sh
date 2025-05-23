@@ -15,20 +15,6 @@ UUID_DIR="/usr/local/etc/xray/clients"
 # 一次性创建目录 
 mkdir -p "$UUID_DIR"
 
-# 依赖：curl jq iptables iptables-persistent netfilter-persistent openssl unzip
-DEPS=(curl jq iptables iptables-persistent netfilter-persistent openssl unzip)
-MISSING=()
-for PKG in "${DEPS[@]}"; do
-  dpkg -s "$PKG" &>/dev/null || MISSING+=("$PKG")
-done
-if [ ${#MISSING[@]} -gt 0 ]; then
-  echo "检测到缺失依赖：${MISSING[*]}，正在安装…"
-  apt update
-  apt install -y "${MISSING[@]}"
-else
-  echo "所有依赖已就绪"
-fi
-
 # 获取公网 IP
 get_ip() {
     curl -s ipv4.ip.sb || curl -s ifconfig.me || hostname -I | awk '{print $1}'
@@ -263,89 +249,47 @@ delete_script() {
 
 # 主菜单
 show_menu() {
-    echo " ================================================== "
-    echo " 警告：请先安装Xray和开放端口后，再去添加vless节点"
-    echo " 介绍：一键安装vless+tcp+reality"
-    echo " 系统：Ubuntu、Debian                        "
-    echo " ================================================== "
-    echo
-    echo " ================ Reality 管理菜单 ================"
-    echo " 1. 添加VLESS节点"
-    echo " 2. 删除VLESS节点"
-    echo " 3. 查看VLESS节点"
-    echo " 4. Xray管理"
-    echo " 5. UFW管理"
-    echo " 6. BBR管理"
-    echo " 7. 删除脚本"
-    echo " 0. 退出"
-    echo " =================================================="
+    echo "================ Reality 管理菜单 ========"
+    echo " 1.  添加VLESS节点"
+    echo " 2.  删除VLESS节点"
+    echo " 3.  查看VLESS节点"
+    echo " --------------- Xray 管理 ---------------"
+    echo " 4.  安装/启用"
+    echo " 5.  停止"
+    echo " 6.  查看状态"
+    echo " 7.  卸载"
+    echo " --------------- UFW 管理 ---------------"
+    echo " 8.  安装/启用"
+    echo " 9.  关闭"
+    echo " 10. 开放端口"
+    echo " 11. 查看规则"
+    echo " --------------- BBR 管理 ---------------"
+    echo " 12. 安装/启用"
+    echo " 13. 关闭"
+    echo " 14. 查看状态"
+    echo " --------------- 脚本管理 ---------------"
+    echo " 15. 安装依赖"
+    echo " 16. 删除脚本"
+    echo " 0.  退出"
+    echo " ======================================="
 }
 
-# 子菜单：Xray
-xray_menu() {
-    echo "--- Xray 管理 ---"
-    echo "1. 安装/启用"
-    echo "2. 停止"
-    echo "3. 查看状态"
-    echo "4. 卸载"
-    read -p "请选择: " sub
-    case $sub in
-        1)
-            if [[ ! -f $XRAY_BIN ]]; then
-                install_xray
-            fi
-            start_xray
-            ;;
-        2) stop_xray;;
-        3) status_xray;;
-        4) uninstall_xray;;
-        *) echo "无效选项";;
-    esac
+# 安装依赖函数
+install_deps() {
+    DEPS=(curl jq iptables iptables-persistent netfilter-persistent openssl unzip)
+    MISSING=()
+    for PKG in "${DEPS[@]}"; do
+      dpkg -s "$PKG" &>/dev/null || MISSING+=("$PKG")
+    done
+    if [ ${#MISSING[@]} -gt 0 ]; then
+      echo "检测到缺失依赖：${MISSING[*]}，正在安装…"
+      apt update
+      apt install -y "${MISSING[@]}"
+    else
+      echo "所有依赖已就绪"
+    fi
 }
 
-# 子菜单：防火墙
-firewall_menu() {
-    echo "--- 防火墙管理 ---"
-    echo "1. 安装/启用"
-    echo "2. 关闭"
-    echo "3. 开放端口"
-    echo "4. 查看规则"
-    read -p "请选择: " sub
-    case $sub in
-        1)
-            dpkg -s iptables-persistent &>/dev/null || install_firewall
-            start_firewall
-            ;;
-        2) stop_firewall;;
-        3) add_firewall_rule;;
-        4) status_firewall;;
-        *) echo "无效选项";;
-    esac
-}
-
-# 子菜单：BBR
-bbr_menu() {
-    echo "--- BBR 管理 ---"
-    echo "1. 安装/启用"
-    echo "2. 关闭"
-    echo "3. 查看状态"
-    read -p "请选择: " sub
-    case $sub in
-        1) install_bbr;;
-        2) disable_bbr;;
-        3) status_bbr;;
-        *) echo "无效选项";;
-    esac
-}
-
-# 创建快捷指令 lamb
-if [[ ! -f /usr/local/bin/lamb ]]; then
-    ln -s "$PWD/$0" /usr/local/bin/lamb
-    chmod +x /usr/local/bin/lamb
-    echo "已创建快捷指令：lamb"
-fi
-
-# 主循环
 while true; do
     show_menu
     read -p "请输入选项: " choice
@@ -353,12 +297,33 @@ while true; do
         1) add_node;;
         2) remove_node;;
         3) view_node;;
-        4) xray_menu;;
-        5) firewall_menu;;
-        6) bbr_menu;;
-        7) delete_script;;
+        4)
+            if [[ ! -f $XRAY_BIN ]]; then
+                install_xray
+            fi
+            start_xray
+            ;;
+        5) stop_xray;;
+        6) status_xray;;
+        7) uninstall_xray;;
+        8)
+            dpkg -s iptables-persistent &>/dev/null || install_firewall
+            start_firewall
+            ;;
+        9) stop_firewall;;
+        10) add_firewall_rule;;
+        11) status_firewall;;
+        12) install_bbr;;
+        13) disable_bbr;;
+        14) status_bbr;;
+        15)
+            apt update
+            apt install -y curl jq iptables iptables-persistent netfilter-persistent openssl unzip
+            ;;
+        16) delete_script;;
         0) exit;;
         *) echo "无效选项，请重新输入";;
     esac
     echo ""
 done
+
