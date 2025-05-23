@@ -149,6 +149,44 @@ EOF
     echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&pbk=$PUBKEY&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-$DOMAIN"
 }
 
+# 添加端口转发（VLESS+TCP+Reality）
+add_port_forward() {
+    echo "=== 添加端口转发（VLESS+TCP+Reality）==="
+    read -p "请输入本地监听端口（如 12345）: " FORWARD_PORT
+    read -p "请输入转发目标地址（如 1.2.3.4:443）: " FORWARD_TARGET
+    read -p "请输入伪装域名（如 itunes.apple.com）: " SERVER_NAME
+    SERVER_NAME=${SERVER_NAME:-itunes.apple.com}
+
+    UUID=$($XRAY_BIN uuid)
+    KEYS=$($XRAY_BIN x25519)
+    PRIVKEY=$(echo "$KEYS" | grep Private | awk '{print $3}')
+    PUBKEY=$(echo "$KEYS" | grep Public | awk '{print $3}')
+    SHORT_ID=$(openssl rand -hex 2)
+
+    CLIENT_FILE="$UUID_DIR/${UUID}_${FORWARD_PORT}_forward.json"
+    cat > "$CLIENT_FILE" <<EOF
+{
+  "uuid": "$UUID",
+  "port": $FORWARD_PORT,
+  "domain": "$(get_ip)",
+  "server_name": "$SERVER_NAME",
+  "private_key": "$PRIVKEY",
+  "public_key": "$PUBKEY",
+  "short_id": "$SHORT_ID",
+  "forward_target": "$FORWARD_TARGET"
+}
+EOF
+
+    generate_config
+    systemctl restart $XRAY_SERVICE
+
+    echo "端口转发已添加！"
+    echo "Reality 公钥: $PUBKEY"
+    echo "VLESS链接："
+    echo "vless://$UUID@$(get_ip):$FORWARD_PORT?type=tcp&security=reality&pbk=$PUBKEY&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-Forward"
+    echo "流量将从本机 $FORWARD_PORT 转发到 $FORWARD_TARGET"
+}
+
 remove_node() {
     echo "现有节点："
     ls $UUID_DIR
@@ -176,17 +214,25 @@ view_node() {
         SERVER_NAME=$(jq -r .server_name "$file")
         PUBKEY=$(jq -r .public_key "$file")
         SHORT_ID=$(jq -r .short_id "$file")
+        FORWARD_TARGET=$(jq -r .forward_target "$file")
         echo "---"
         echo "端口: $PORT"
         echo "UUID: $UUID"
         echo "Reality 公钥: $PUBKEY"
-        echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&pbk=$PUBKEY&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-$PORT"
+        if [[ "$FORWARD_TARGET" != "null" && "$FORWARD_TARGET" != "" ]]; then
+            echo "端口转发目标: $FORWARD_TARGET"
+            echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&pbk=$PUBKEY&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-Forward"
+        else
+            echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&pbk=$PUBKEY&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-$PORT"
+        fi
     done
 }
 
-# ✅ 支持多个端口节点，生成多个 inbounds 配置项
+# ✅ 支持多个端口节点，生成多个 inbounds 配置项，支持端口转发
 generate_config() {
     INBOUNDS="[]"
+    OUTBOUNDS="[{\"protocol\": \"freedom\", \"tag\": \"direct\"}]"
+    ROUTING_RULES="[]"
     for file in $UUID_DIR/*.json; do
         [ -f "$file" ] || continue
         UUID=$(jq -r .uuid "$file")
@@ -195,6 +241,7 @@ generate_config() {
         PRIVKEY=$(jq -r .private_key "$file")
         SHORT_ID=$(jq -r .short_id "$file")
         PUBKEY=$(jq -r .public_key "$file")
+        FORWARD_TARGET=$(jq -r .forward_target "$file")
         SHORT_IDS="[\"$SHORT_ID\"]"
         CLIENT="[{\"id\": \"$UUID\", \"flow\": \"xtls-rprx-vision\"}]"
 
@@ -218,22 +265,26 @@ generate_config() {
       "privateKey": "$PRIVKEY",
       "shortIds": $SHORT_IDS
     }
-  }
+  },
+  "tag": "port$PORT"
 }
 EOF
 )
         INBOUNDS=$(echo "$INBOUNDS" | jq ". + [$INBOUND]")
+
+        if [[ "$FORWARD_TARGET" != "null" && "$FORWARD_TARGET" != "" ]]; then
+            OUTBOUNDS=$(echo "$OUTBOUNDS" | jq ". + [{\"protocol\": \"freedom\", \"settings\": {\"redirect\": \"$FORWARD_TARGET\"}, \"tag\": \"forward$PORT\"}]")
+            ROUTING_RULES=$(echo "$ROUTING_RULES" | jq ". + [{\"type\": \"field\", \"inboundTag\": [\"port$PORT\"], \"outboundTag\": \"forward$PORT\"}]")
+        fi
     done
 
-    # 写入配置文件
     cat > $XRAY_CONFIG_PATH <<EOF
 {
   "inbounds": $INBOUNDS,
-  "outbounds": [
-    {
-      "protocol": "freedom"
-    }
-  ]
+  "outbounds": $OUTBOUNDS,
+  "routing": {
+    "rules": $ROUTING_RULES
+  }
 }
 EOF
 }
@@ -249,32 +300,28 @@ delete_script() {
 
 # 主菜单
 show_menu() {
-    echo " ======================================== "
-    echo " 警告：请先安装依赖、Xray和开放端口"
-    echo " 介绍：一键安装vless+tcp+reality"
-    echo " 系统：Ubuntu、Debian                        "
-    echo " ======================================== "
     echo "================ Reality 管理菜单 ========"
     echo " 1.  添加VLESS节点"
     echo " 2.  删除VLESS节点"
     echo " 3.  查看VLESS节点"
+    echo " 4.  添加端口转发"
     echo " --------------- Xray 管理 ---------------"
-    echo " 4.  安装/启用"
-    echo " 5.  停止"
-    echo " 6.  查看状态"
-    echo " 7.  卸载"
+    echo " 5.  安装/启用"
+    echo " 6.  停止"
+    echo " 7.  查看状态"
+    echo " 8.  卸载"
     echo " --------------- UFW 管理 ---------------"
-    echo " 8.  安装/启用"
-    echo " 9.  关闭"
-    echo " 10. 开放端口"
-    echo " 11. 查看规则"
+    echo " 9.  安装/启用"
+    echo " 10. 关闭"
+    echo " 11. 开放端口"
+    echo " 12. 查看规则"
     echo " --------------- BBR 管理 ---------------"
-    echo " 12. 安装/启用"
-    echo " 13. 关闭"
-    echo " 14. 查看状态"
+    echo " 13. 安装/启用"
+    echo " 14. 关闭"
+    echo " 15. 查看状态"
     echo " --------------- 脚本管理 ---------------"
-    echo " 15. 安装依赖"
-    echo " 16. 删除脚本"
+    echo " 16. 安装依赖"
+    echo " 17. 删除脚本"
     echo " 0.  退出"
     echo " ======================================="
 }
@@ -302,33 +349,30 @@ while true; do
         1) add_node;;
         2) remove_node;;
         3) view_node;;
-        4)
+        4) add_port_forward;;
+        5)
             if [[ ! -f $XRAY_BIN ]]; then
                 install_xray
             fi
             start_xray
             ;;
-        5) stop_xray;;
-        6) status_xray;;
-        7) uninstall_xray;;
-        8)
+        6) stop_xray;;
+        7) status_xray;;
+        8) uninstall_xray;;
+        9)
             dpkg -s iptables-persistent &>/dev/null || install_firewall
             start_firewall
             ;;
-        9) stop_firewall;;
-        10) add_firewall_rule;;
-        11) status_firewall;;
-        12) install_bbr;;
-        13) disable_bbr;;
-        14) status_bbr;;
-        15)
-            apt update
-            apt install -y curl jq iptables iptables-persistent netfilter-persistent openssl unzip
-            ;;
-        16) delete_script;;
+        10) stop_firewall;;
+        11) add_firewall_rule;;
+        12) status_firewall;;
+        13) install_bbr;;
+        14) disable_bbr;;
+        15) status_bbr;;
+        16) install_deps;;
+        17) delete_script;;
         0) exit;;
         *) echo "无效选项，请重新输入";;
     esac
     echo ""
 done
-
