@@ -321,11 +321,6 @@ delete_script() {
 
 # 主菜单
 show_menu() {
-    echo " ======================================== "
-    echo " 警告：请先安装依赖、Xray和开放端口"
-    echo " 介绍：一键安装vless+tcp+reality"
-    echo " 系统：Ubuntu、Debian                        "
-    echo " ======================================== "
     echo "================ Reality 管理菜单 ========"
     echo " 1.   添加VLESS节点"
     echo " 2.   删除VLESS节点"
@@ -340,8 +335,8 @@ show_menu() {
     echo " 9.   查看状态"
     echo " 10.  卸载"
     echo " --------------- UFW 管理 ---------------"
-    echo " 11.   安装/启用"
-    echo " 12.   关闭"
+    echo " 11.  安装/启用"
+    echo " 12.  关闭"
     echo " 13.  开放端口"
     echo " 14.  查看规则"
     echo " --------------- BBR 管理 ---------------"
