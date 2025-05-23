@@ -284,18 +284,21 @@ show_menu() {
 # 子菜单：Xray
 xray_menu() {
     echo "--- Xray 管理 ---"
-    echo "1. 安装"
-    echo "2. 启动"
-    echo "3. 停止"
-    echo "4. 查看状态"
-    echo "5. 卸载"
+    echo "1. 安装/启用"
+    echo "2. 停止"
+    echo "3. 查看状态"
+    echo "4. 卸载"
     read -p "请选择: " sub
     case $sub in
-        1) install_xray;;
-        2) start_xray;;
-        3) stop_xray;;
-        4) status_xray;;
-        5) uninstall_xray;;
+        1)
+            if [[ ! -f $XRAY_BIN ]]; then
+                install_xray
+            fi
+            start_xray
+            ;;
+        2) stop_xray;;
+        3) status_xray;;
+        4) uninstall_xray;;
         *) echo "无效选项";;
     esac
 }
@@ -303,18 +306,19 @@ xray_menu() {
 # 子菜单：防火墙
 firewall_menu() {
     echo "--- 防火墙管理 ---"
-    echo "1. 安装"
-    echo "2. 开启"
-    echo "3. 关闭"
-    echo "4. 开放端口"
-    echo "5. 查看规则"
+    echo "1. 安装/启用"
+    echo "2. 关闭"
+    echo "3. 开放端口"
+    echo "4. 查看规则"
     read -p "请选择: " sub
     case $sub in
-        1) install_firewall;;
-        2) start_firewall;;
-        3) stop_firewall;;
-        4) add_firewall_rule;;
-        5) status_firewall;;
+        1)
+            dpkg -s iptables-persistent &>/dev/null || install_firewall
+            start_firewall
+            ;;
+        2) stop_firewall;;
+        3) add_firewall_rule;;
+        4) status_firewall;;
         *) echo "无效选项";;
     esac
 }
