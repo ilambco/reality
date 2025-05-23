@@ -374,19 +374,21 @@ while true; do
         1) add_node;;
         2) remove_node;;
         3) view_node;;
-        4)
+        
+        4) add_port_forward;;
+        5) remove_port_forward;;
+        6) list_port_forward;;
+        
+        7)
             if [[ ! -f $XRAY_BIN ]]; then
                 install_xray
             fi
             start_xray
             ;;
-        4) add_port_forward;;
-        5) remove_port_forward;;
-        6) list_port_forward;;
-        7) start_xray;;
         8) stop_xray;;
         9) status_xray;;
         10) uninstall_xray;;
+
         11)
             dpkg -s iptables-persistent &>/dev/null || install_firewall
             start_firewall
