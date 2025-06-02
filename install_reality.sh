@@ -328,11 +328,20 @@ EOF
 # 生成 Shadowsocks 配置
 generate_ss_config() {
     INBOUNDS="[]"
+    declare -A PORT_TRACKER  # 用于跟踪已处理的端口，避免重复
+
     for file in $UUID_DIR/ss_*.json; do
         [ -f "$file" ] || continue
         PORT=$(jq -r .port "$file")
         PASSWORD=$(jq -r .password "$file")
         METHOD=$(jq -r .method "$file")
+
+        # 检查端口是否已处理过
+        if [[ -n "${PORT_TRACKER[$PORT]}" ]]; then
+            echo "警告：端口 $PORT 已存在，跳过重复配置"
+            continue
+        fi
+        PORT_TRACKER[$PORT]=1  # 标记端口为已处理
 
         INBOUND=$(cat <<EOF
 {
