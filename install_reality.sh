@@ -165,7 +165,7 @@ add_ss_node() {
     # 密码可自定义，默认随机
     read -p "请输入密码（留空则自动生成随机密码）: " SS_PASSWORD
     if [[ -z "$SS_PASSWORD" ]]; then
-        SS_PASSWORD=$(openssl rand -base64 16)
+        SS_PASSWORD=$(openssl rand 32 | base64 | tr -d '\n')
     fi
 
     SERVER_IP=$(get_ip)
