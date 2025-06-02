@@ -291,7 +291,7 @@ generate_config() {
         if [[ "$PASSWORD" == "null" || "$METHOD" == "null" ]]; then
             echo "警告: 跳过无效的SS配置文件: $file"
             continue
-        fi  # 修改这里，将 } 改为 fi
+        fi
 
         SS_INBOUND=$(cat <<EOF
 {
