@@ -332,6 +332,15 @@ install_deps() {
     fi
 }
 
+# 删除脚本本体和快捷方式
+delete_script() {
+    echo "即将删除脚本和快捷指令..."
+    rm -f /root/install_reality.sh
+    rm -f /usr/local/bin/lamb
+    echo "脚本和 lamb 快捷方式已删除"
+    exit
+}
+
 # 主循环
 while true; do
     show_menu
