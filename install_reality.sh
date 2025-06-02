@@ -130,13 +130,13 @@ urlsafe_base64_encode() {
     echo -n "$str" | base64 -w 0 | tr '+/' '-_' | tr -d '='
 }
 
-# 修改add_ss_node函数中的链接生成部分
+# 修改add_ss_node函数
 add_ss_node() {
     read -p "请输入端口（默认10000）: " PORT
     PORT=${PORT:-10000}
     
-    # 生成随机密码
-    PASSWORD=$(openssl rand -base64 16)
+    # 生成随机密码 (使用base64格式的密钥)
+    PASSWORD=$(openssl rand -base64 32)
     METHOD="2022-blake3-aes-256-gcm"
 
     # 保存SS配置信息
@@ -144,8 +144,33 @@ add_ss_node() {
     cat > "$CLIENT_FILE" <<EOF
 {
     "port": $PORT,
-    "password": "$PASSWORD",
-    "method": "$METHOD"
+    "protocol": "shadowsocks",
+    "settings": {
+        "method": "$METHOD",
+        "password": "$PASSWORD",
+        "network": "tcp,udp"
+    },
+    "streamSettings": {
+        "network": "tcp",
+        "security": "none",
+        "tcpSettings": {
+            "acceptProxyProtocol": false,
+            "header": {
+                "type": "none"
+            }
+        }
+    },
+    "sniffing": {
+        "enabled": false,
+        "destOverride": [
+            "http",
+            "tls",
+            "quic",
+            "fakedns"
+        ],
+        "metadataOnly": false,
+        "routeOnly": false
+    }
 }
 EOF
 
