@@ -124,7 +124,13 @@ disable_bbr() {
     echo "BBR 配置已移除"
 }
 
-# 添加 Shadowsocks 节点
+# 修改base64编码函数
+urlsafe_base64_encode() {
+    local str=$1
+    echo -n "$str" | base64 -w 0 | tr '+/' '-_' | tr -d '='
+}
+
+# 修改add_ss_node函数中的链接生成部分
 add_ss_node() {
     read -p "请输入端口（默认10000）: " PORT
     PORT=${PORT:-10000}
@@ -145,9 +151,9 @@ EOF
 
     # 生成SS URL链接
     IP=$(get_ip)
-    METHOD_B64=$(urlsafe_base64_encode "$METHOD")
-    PWD_B64=$(urlsafe_base64_encode "$PASSWORD")
-    SS_URL="ss://${METHOD_B64}:${PWD_B64}@${IP}:${PORT}#SS-${PORT}"
+    # 将method:password组合进行base64编码
+    USERINFO=$(echo -n "${METHOD}:${PASSWORD}" | base64 -w 0)
+    SS_URL="ss://${USERINFO}@${IP}:${PORT}#SS-${PORT}"
 
     echo "Shadowsocks节点已添加"
     echo "端口: $PORT"
@@ -226,13 +232,13 @@ view_node() {
         PASSWORD=$(jq -r .password "$file")
         METHOD=$(jq -r .method "$file")
         IP=$(get_ip)
-        METHOD_B64=$(urlsafe_base64_encode "$METHOD")
-        PWD_B64=$(urlsafe_base64_encode "$PASSWORD")
+        # 将method:password组合进行base64编码
+        USERINFO=$(echo -n "${METHOD}:${PASSWORD}" | base64 -w 0)
         echo "---"
         echo "端口: $PORT"
         echo "密码: $PASSWORD"
         echo "加密方式: $METHOD"
-        echo "ss://${METHOD_B64}:${PWD_B64}@${IP}:${PORT}#SS-${PORT}"
+        echo "ss://${USERINFO}@${IP}:${PORT}#SS-${PORT}"
     done
 }
 
