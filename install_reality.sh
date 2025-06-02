@@ -261,14 +261,17 @@ EOF
 
 # 添加 Shadowsocks 节点
 add_ss_node() {
-    read -p "请输入端口（默认8388）: " SS_PORT
-    SS_PORT=${SS_PORT:-8388}
+    read -p "请输入端口（默认9885）: " SS_PORT
+    SS_PORT=${SS_PORT:-9885}
 
     # 推荐加密方式
-    SS_METHOD="aes-256-gcm"
+    SS_METHOD="2022-blake3-aes-256-gcm"
 
-    # 随机密码
-    SS_PASSWORD=$(openssl rand -base64 12)
+    # 密码可自定义，默认随机
+    read -p "请输入密码（留空则自动生成随机密码）: " SS_PASSWORD
+    if [[ -z "$SS_PASSWORD" ]]; then
+        SS_PASSWORD=$(openssl rand -base64 16)
+    fi
 
     SERVER_IP=$(get_ip)
     SS_LINK="ss://$(echo -n "$SS_METHOD:$SS_PASSWORD@$SERVER_IP:$SS_PORT" | base64 -w0)"
