@@ -159,7 +159,6 @@ remove_node() {
     echo "现有节点："
     ls $UUID_DIR
     read -p "请输入要删除的UUID: " DEL_UUID
-    # 查找包含 UUID 的文件
     FILE_TO_DELETE=$(find $UUID_DIR -type f -name "${DEL_UUID}_*.json")
     if [[ -f "$FILE_TO_DELETE" ]]; then
         rm -f "$FILE_TO_DELETE"
@@ -244,6 +243,88 @@ EOF
 EOF
 }
 
+# 添加 Shadowsocks 节点
+add_ss_node() {
+    read -p "请输入端口（默认8388）: " SS_PORT
+    SS_PORT=${SS_PORT:-8388}
+
+    read -p "请输入密码（默认password）: " SS_PASSWORD
+    SS_PASSWORD=${SS_PASSWORD:-password}
+
+    read -p "请输入加密方式（默认aes-256-gcm）: " SS_METHOD
+    SS_METHOD=${SS_METHOD:-aes-256-gcm}
+
+    SS_CONFIG_FILE="$UUID_DIR/ss_${SS_PORT}.json"
+    cat > "$SS_CONFIG_FILE" <<EOF
+{
+  "port": $SS_PORT,
+  "password": "$SS_PASSWORD",
+  "method": "$SS_METHOD"
+}
+EOF
+
+    echo "SS 节点已添加，端口: $SS_PORT，密码: $SS_PASSWORD，加密方式: $SS_METHOD"
+
+    generate_ss_config
+    systemctl restart $XRAY_SERVICE
+}
+
+# 删除 Shadowsocks 节点
+remove_ss_node() {
+    echo "现有 SS 节点："
+    ls $UUID_DIR/ss_*.json 2>/dev/null
+    read -p "请输入要删除的端口: " DEL_PORT
+    SS_FILE="$UUID_DIR/ss_${DEL_PORT}.json"
+    if [[ -f "$SS_FILE" ]]; then
+        rm -f "$SS_FILE"
+        echo "已删除 SS 节点，端口: $DEL_PORT"
+        generate_ss_config
+        systemctl restart $XRAY_SERVICE
+    else
+        echo "未找到对应端口的 SS 节点"
+    fi
+}
+
+# 生成 Shadowsocks 配置
+generate_ss_config() {
+    INBOUNDS="[]"
+    for file in $UUID_DIR/ss_*.json; do
+        [ -f "$file" ] || continue
+        PORT=$(jq -r .port "$file")
+        PASSWORD=$(jq -r .password "$file")
+        METHOD=$(jq -r .method "$file")
+
+        INBOUND=$(cat <<EOF
+{
+  "port": $PORT,
+  "protocol": "shadowsocks",
+  "settings": {
+    "method": "$METHOD",
+    "password": "$PASSWORD",
+    "network": "tcp,udp"
+  }
+}
+EOF
+)
+        INBOUNDS=$(echo "$INBOUNDS" | jq ". + [$INBOUND]")
+    done
+
+    # 合并 VLESS 和 SS 配置
+    VLESS_INBOUNDS=$(jq -r .inbounds $XRAY_CONFIG_PATH 2>/dev/null || echo "[]")
+    MERGED_INBOUNDS=$(echo "$VLESS_INBOUNDS" | jq ". + $INBOUNDS")
+
+    # 写入配置文件
+    cat > $XRAY_CONFIG_PATH <<EOF
+{
+  "inbounds": $MERGED_INBOUNDS,
+  "outbounds": [
+    {
+      "protocol": "freedom"
+    }
+  ]
+}
+EOF
+}
 
 # 端口转发规则文件
 PORT_FORWARD_FILE="/usr/local/etc/xray/port_forward_rules.txt"
@@ -309,7 +390,6 @@ list_port_forward() {
     done < "$PORT_FORWARD_FILE"
 }
 
-
 # 删除脚本本体和快捷方式
 delete_script() {
     echo "即将删除脚本和快捷指令..."
@@ -324,30 +404,31 @@ show_menu() {
     echo "================ Reality 管理菜单 ========"
     echo " 1.   添加VLESS节点"
     echo " 2.   删除VLESS节点"
-    echo " 3.   查看VLESS节点"
+    echo " 3.   添加SS节点"
+    echo " 4.   删除SS节点"
+    echo " 5.   查看节点"
     echo " --------------- 端口转发 ---------------"
-    echo " 4.   添加端口转发"
-    echo " 5.   删除端口转发"
-    echo " 6.   查看端口转发"
+    echo " 6.   添加端口转发"
+    echo " 7.   删除端口转发"
+    echo " 8.   查看端口转发"
     echo " --------------- Xray 管理 ---------------"
-    echo " 7.   安装/启用"
-    echo " 8.   停止"
-    echo " 9.   查看状态"
-    echo " 10.  卸载"
+    echo " 9.   安装/启用"
+    echo " 10.   停止"
+    echo " 11.   查看状态"
+    echo " 12.  卸载"
     echo " --------------- UFW 管理 ---------------"
-    echo " 11.  安装/启用"
-    echo " 12.  关闭"
-    echo " 13.  开放端口"
-    echo " 14.  查看规则"
+    echo " 13.  安装/启用"
+    echo " 14.  关闭"
+    echo " 15.  开放端口"
+    echo " 16.  查看规则"
     echo " --------------- BBR 管理 ---------------"
-    echo " 15.  安装/启用"
-    echo " 16.  关闭"
-    echo " 17.  查看状态"
+    echo " 17.  安装/启用"
+    echo " 18.  关闭"
+    echo " 19.  查看状态"
     echo " --------------- 脚本管理 ---------------"
-    echo " 18.  安装依赖"
-    echo " 19.  删除脚本"
+    echo " 20.  安装依赖"
+    echo " 21.  删除脚本"
     echo " 0.   退出"
-
     echo " ======================================="
 }
 
@@ -371,40 +452,35 @@ while true; do
     show_menu
     read -p "请输入选项: " choice
     case $choice in
-
         1) add_node;;
         2) remove_node;;
-        3) view_node;;
-        
-        4) add_port_forward;;
-        5) remove_port_forward;;
-        6) list_port_forward;;
-        
-        7)
+        3) add_ss_node;;
+        4) remove_ss_node;;
+        5) view_node;;
+        6) add_port_forward;;
+        7) remove_port_forward;;
+        8) list_port_forward;;
+        9)
             if [[ ! -f $XRAY_BIN ]]; then
                 install_xray
             fi
             start_xray
             ;;
-        8) stop_xray;;
-        9) status_xray;;
-        10) uninstall_xray;;
-
-        11)
+        10) stop_xray;;
+        11) status_xray;;
+        12) uninstall_xray;;
+        13)
             dpkg -s iptables-persistent &>/dev/null || install_firewall
             start_firewall
             ;;
-        12) stop_firewall;;
-        13) add_firewall_rule;;
-        14) status_firewall;;
-        15) install_bbr;;
-        16) disable_bbr;;
-        17) status_bbr;;
-        18)
-            apt update
-            apt install -y curl jq iptables iptables-persistent netfilter-persistent openssl unzip
-            ;;
-        19) delete_script;;
+        14) stop_firewall;;
+        15) add_firewall_rule;;
+        16) status_firewall;;
+        17) install_bbr;;
+        18) disable_bbr;;
+        19) status_bbr;;
+        20) install_deps;;
+        21) delete_script;;
         0) exit;;
         *) echo "无效选项，请重新输入";;
     esac
