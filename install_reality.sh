@@ -130,13 +130,13 @@ urlsafe_base64_encode() {
     echo -n "$str" | base64 -w 0 | tr '+/' '-_' | tr -d '='
 }
 
-# 修改add_ss_node函数
+# 修改 add_ss_node 函数
 add_ss_node() {
     read -p "请输入端口（默认10000）: " PORT
     PORT=${PORT:-10000}
     
-    # 生成随机密码 (使用base64格式的密钥)
-    PASSWORD=$(openssl rand -base64 32)
+    # 生成随机密码 (必须是32字节的Base64字符串)
+    PASSWORD=$(head -c 24 /dev/urandom | base64 -w 0)
     METHOD="2022-blake3-aes-256-gcm"
 
     # 保存SS配置信息
@@ -148,7 +148,8 @@ add_ss_node() {
     "settings": {
         "method": "$METHOD",
         "password": "$PASSWORD",
-        "network": "tcp,udp"
+        "network": "tcp,udp",
+        "ivCheck": false
     },
     "streamSettings": {
         "network": "tcp",
@@ -278,7 +279,7 @@ generate_config() {
         INBOUNDS=$(echo "$INBOUNDS" | jq ". + [$INBOUND]")
     done
 
-    # 处理Shadowsocks节点
+    # 处理 Shadowsocks 节点
     for file in $SS_DIR/ss_*.json; do
         [ -f "$file" ] || continue
         PORT=$(jq -r .port "$file")
@@ -291,10 +292,30 @@ generate_config() {
     "protocol": "shadowsocks",
     "settings": {
         "method": "$METHOD",
-        "password": "$PASSWORD"
+        "password": "$PASSWORD",
+        "network": "tcp,udp",
+        "ivCheck": false
     },
     "streamSettings": {
-        "network": "tcp"
+        "network": "tcp",
+        "security": "none",
+        "tcpSettings": {
+            "acceptProxyProtocol": false,
+            "header": {
+                "type": "none"
+            }
+        }
+    },
+    "sniffing": {
+        "enabled": false,
+        "destOverride": [
+            "http",
+            "tls",
+            "quic",
+            "fakedns"
+        ],
+        "metadataOnly": false,
+        "routeOnly": false
     }
 }
 EOF
@@ -317,7 +338,7 @@ EOF
 
 # 主菜单
 show_menu() {
-    echo "================ Reality 管理菜单 ========"
+    echo "================ Reality 管理菜单111 ========"
     echo " 1.   添加VLESS+reality节点"
     echo " 2.   添加Shadowsocks节点"
     echo " 3.   删除节点"
