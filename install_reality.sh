@@ -27,7 +27,7 @@ mkdir -p "$SS_DIR"
 # base64 编码函数
 urlsafe_base64_encode() {
     local str=$1
-    echo -n "$str" | base64 | tr '+/' '-_' | tr -d '='
+    echo -n "$str" | base64 -w 0 | tr '+/' '-_' | tr -d '='
 }
 
 # 获取公网 IP
@@ -130,13 +130,13 @@ urlsafe_base64_encode() {
     echo -n "$str" | base64 -w 0 | tr '+/' '-_' | tr -d '='
 }
 
-# 修改 add_ss_node 函数
+# 添加 Shadowsocks 节点
 add_ss_node() {
     read -p "请输入端口（默认10000）: " PORT
     PORT=${PORT:-10000}
     
-    # 生成随机密码 (必须是32字节的Base64字符串)
-    PASSWORD=$(head -c 24 /dev/urandom | base64 -w 0)
+    # 生成随机密码
+    PASSWORD=$(openssl rand -base64 32)
     METHOD="2022-blake3-aes-256-gcm"
 
     # 保存SS配置信息
@@ -144,40 +144,13 @@ add_ss_node() {
     cat > "$CLIENT_FILE" <<EOF
 {
     "port": $PORT,
-    "protocol": "shadowsocks",
-    "settings": {
-        "method": "2022-blake3-aes-256-gcm",
-        "password": "$PASSWORD",
-        "network": "tcp,udp",
-        "ivCheck": false
-    },
-    "streamSettings": {
-        "network": "tcp",
-        "security": "none",
-        "tcpSettings": {
-            "acceptProxyProtocol": false,
-            "header": {
-                "type": "none"
-            }
-        }
-    },
-    "sniffing": {
-        "enabled": false,
-        "destOverride": [
-            "http",
-            "tls",
-            "quic",
-            "fakedns"
-        ],
-        "metadataOnly": false,
-        "routeOnly": false
-    }
+    "password": "$PASSWORD",
+    "method": "$METHOD"
 }
 EOF
 
     # 生成SS URL链接
     IP=$(get_ip)
-    # 将method:password组合进行base64编码
     USERINFO=$(echo -n "${METHOD}:${PASSWORD}" | base64 -w 0)
     SS_URL="ss://${USERINFO}@${IP}:${PORT}#SS-${PORT}"
 
@@ -258,7 +231,6 @@ view_node() {
         PASSWORD=$(jq -r .password "$file")
         METHOD=$(jq -r .method "$file")
         IP=$(get_ip)
-        # 将method:password组合进行base64编码
         USERINFO=$(echo -n "${METHOD}:${PASSWORD}" | base64 -w 0)
         echo "---"
         echo "端口: $PORT"
@@ -275,19 +247,18 @@ generate_config() {
     # 处理VLESS节点
     for file in $UUID_DIR/*.json; do
         [ -f "$file" ] || continue
-        # ...existing code... (保持VLESS配置生成部分不变)
-        INBOUNDS=$(echo "$INBOUNDS" | jq ". + [$INBOUND]")
+        # ...此处省略VLESS节点处理逻辑...
+        # INBOUNDS=$(echo "$INBOUNDS" | jq ". + [$INBOUND]")
     done
 
     # 处理 Shadowsocks 节点
     for file in $SS_DIR/ss_*.json; do
         [ -f "$file" ] || continue
-        # 读取配置并检查有效性
-        PORT=$(jq -r '.port' "$file")
-        PASSWORD=$(jq -r '.settings.password' "$file")
-        METHOD=$(jq -r '.settings.method' "$file")
+        PORT=$(jq -r .port "$file")
+        PASSWORD=$(jq -r .password "$file")
+        METHOD=$(jq -r .method "$file")
 
-        # 确保值不为null
+        # 跳过无效配置
         if [[ "$PASSWORD" == "null" || "$METHOD" == "null" ]]; then
             echo "警告: 跳过无效的SS配置文件: $file"
             continue
