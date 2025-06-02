@@ -130,7 +130,7 @@ add_ss_node() {
     PORT=${PORT:-10000}
     
     # 生成随机密码
-    PASSWORD=$(openssl rand -base64 32)
+    PASSWORD=$(openssl rand -base64 16)
     METHOD="2022-blake3-aes-256-gcm"
 
     # 保存SS配置信息
@@ -286,7 +286,7 @@ EOF
 
 # 主菜单
 show_menu() {
-    echo "================ Reality 管理菜单v1 ========"
+    echo "================ Reality 管理菜单 ========"
     echo " 1.   添加VLESS+reality节点"
     echo " 2.   添加Shadowsocks节点"
     echo " 3.   删除节点"
