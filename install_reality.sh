@@ -172,8 +172,9 @@ remove_node() {
 
 # 查看所有节点
 view_node() {
-    echo "当前节点列表："
+    echo "【VLESS 节点列表】"
     for file in $UUID_DIR/*.json; do
+        [[ "$file" == *ss_* ]] && continue
         [ -e "$file" ] || continue
         UUID=$(jq -r .uuid "$file")
         DOMAIN=$(jq -r .domain "$file")
@@ -186,6 +187,21 @@ view_node() {
         echo "UUID: $UUID"
         echo "Reality 公钥: $PUBKEY"
         echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&pbk=$PUBKEY&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-$PORT"
+    done
+
+    echo
+    echo "【Shadowsocks 节点列表】"
+    for file in $UUID_DIR/ss_*.json; do
+        [ -e "$file" ] || continue
+        PORT=$(jq -r .port "$file")
+        PASSWORD=$(jq -r .password "$file")
+        METHOD=$(jq -r .method "$file")
+        SS_LINK=$(jq -r .ss_link "$file")
+        echo "---"
+        echo "端口: $PORT"
+        echo "密码: $PASSWORD"
+        echo "加密方式: $METHOD"
+        echo "ss 链接: $SS_LINK"
     done
 }
 
@@ -248,22 +264,30 @@ add_ss_node() {
     read -p "请输入端口（默认8388）: " SS_PORT
     SS_PORT=${SS_PORT:-8388}
 
-    read -p "请输入密码（默认password）: " SS_PASSWORD
-    SS_PASSWORD=${SS_PASSWORD:-password}
+    # 推荐加密方式
+    SS_METHOD="aes-256-gcm"
 
-    read -p "请输入加密方式（默认aes-256-gcm）: " SS_METHOD
-    SS_METHOD=${SS_METHOD:-aes-256-gcm}
+    # 随机密码
+    SS_PASSWORD=$(openssl rand -base64 12)
+
+    SERVER_IP=$(get_ip)
+    SS_LINK="ss://$(echo -n "$SS_METHOD:$SS_PASSWORD@$SERVER_IP:$SS_PORT" | base64 -w0)"
 
     SS_CONFIG_FILE="$UUID_DIR/ss_${SS_PORT}.json"
     cat > "$SS_CONFIG_FILE" <<EOF
 {
   "port": $SS_PORT,
   "password": "$SS_PASSWORD",
-  "method": "$SS_METHOD"
+  "method": "$SS_METHOD",
+  "ss_link": "$SS_LINK"
 }
 EOF
 
-    echo "SS 节点已添加，端口: $SS_PORT，密码: $SS_PASSWORD，加密方式: $SS_METHOD"
+    echo "SS 节点已添加："
+    echo "端口: $SS_PORT"
+    echo "密码: $SS_PASSWORD"
+    echo "加密方式: $SS_METHOD"
+    echo "ss 链接: $SS_LINK"
 
     generate_ss_config
     systemctl restart $XRAY_SERVICE
@@ -413,8 +437,8 @@ show_menu() {
     echo " 8.   查看端口转发"
     echo " --------------- Xray 管理 ---------------"
     echo " 9.   安装/启用"
-    echo " 10.   停止"
-    echo " 11.   查看状态"
+    echo " 10.  停止"
+    echo " 11.  查看状态"
     echo " 12.  卸载"
     echo " --------------- UFW 管理 ---------------"
     echo " 13.  安装/启用"
