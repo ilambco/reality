@@ -123,8 +123,8 @@ add_node() {
     read -p "请输入域名或IP（默认使用本机IP）:" DOMAIN
     DOMAIN=${DOMAIN:-$(get_ip)}
 
-    read -p "请输入端口（默认443）: " PORT
-    PORT=${PORT:-443}
+    read -p "请输入端口（默认443）: " VLESS_PORT
+    VLESS_PORT=${VLESS_PORT:-443}
 
     read -p "请输入伪装域名（默认itunes.apple.com）: " SERVER_NAME
     SERVER_NAME=${SERVER_NAME:-itunes.apple.com}
@@ -135,11 +135,11 @@ add_node() {
     PUBKEY=$(echo "$KEYS" | grep Public | awk '{print $3}')
     SHORT_ID=$(openssl rand -hex 2)
 
-    CLIENT_FILE="$UUID_DIR/${UUID}_${PORT}.json"
+    CLIENT_FILE="$UUID_DIR/${UUID}_${VLESS_PORT}.json"
     cat > "$CLIENT_FILE" <<EOF
 {
   "uuid": "$UUID",
-  "port": $PORT,
+  "port": $VLESS_PORT,
   "domain": "$DOMAIN",
   "server_name": "$SERVER_NAME",
   "private_key": "$PRIVKEY",
@@ -154,21 +154,20 @@ EOF
     generate_config
     systemctl restart $XRAY_SERVICE
 
-    echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&pbk=$PUBKEY&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-$DOMAIN"
+    echo "vless://$UUID@$DOMAIN:$VLESS_PORT?type=tcp&security=reality&pbk=$PUBKEY&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-$DOMAIN"
 }
 
 # 添加 Shadowsocks 节点
 add_ss_node() {
     mkdir -p "$SS_DIR"
-    read -p "请输入端口（默认10000）: " PORT
-    PORT=${PORT:-10000}
+    read -p "请输入端口（默认10000）: " SS_PORT
+    SS_PORT=${SS_PORT:-10000}
     METHOD="2022-blake3-aes-256-gcm"
-    # 生成32字节原始密钥并base64编码（44位）
     PASSWORD=$(head -c 32 /dev/urandom | base64 | tr -d '\n')
-    CLIENT_FILE="$SS_DIR/ss_${PORT}.json"
+    CLIENT_FILE="$SS_DIR/ss_${SS_PORT}.json"
     cat > "$CLIENT_FILE" <<EOF
 {
-    "port": $PORT,
+    "port": $SS_PORT,
     "password": "$PASSWORD",
     "method": "$METHOD"
 }
@@ -176,10 +175,10 @@ EOF
 
     IP=$(get_ip)
     USERINFO=$(echo -n "${METHOD}:${PASSWORD}" | base64 -w 0)
-    SS_URL="ss://${USERINFO}@${IP}:${PORT}#SS-${PORT}"
+    SS_URL="ss://${USERINFO}@${IP}:${SS_PORT}#SS-${SS_PORT}"
 
     echo "Shadowsocks节点已添加"
-    echo "端口: $PORT"
+    echo "端口: $SS_PORT"
     echo "密码: $PASSWORD"
     echo "加密方式: $METHOD"
     echo "节点链接: $SS_URL"
@@ -442,7 +441,7 @@ delete_script() {
 
 # 主菜单
 show_menu() {
-    echo "================ Reality 管理菜单1 ========"
+    echo "================ Reality 管理菜单 ========"
     echo " 1.   添加VLESS+reality节点"
     echo " 2.   添加Shadowsocks节点"
     echo " 3.   删除节点"
