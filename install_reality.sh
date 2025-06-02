@@ -1,4 +1,5 @@
 #!/bin/bash
+
 # 自动创建 lamb 快捷方式（首次运行时执行）
 if [[ "$(realpath $0)" != "/usr/local/bin/lamb" ]] && [[ ! -f /usr/local/bin/lamb ]]; then
     cp "$(realpath $0)" /usr/local/bin/lamb
@@ -17,9 +18,11 @@ XRAY_CONFIG_PATH="/usr/local/etc/xray/config.json"
 XRAY_BIN="/usr/local/bin/xray"
 XRAY_SERVICE="xray.service"
 UUID_DIR="/usr/local/etc/xray/clients"
+SS_DIR="/usr/local/etc/xray/ss_clients"
 
-# 一次性创建目录 
+# 一次性创建所需目录 
 mkdir -p "$UUID_DIR"
+mkdir -p "$SS_DIR"
 
 # 获取公网 IP
 get_ip() {
@@ -148,96 +151,99 @@ EOF
 
     echo "节点已添加，UUID: $UUID"
     echo "Reality 公钥: $PUBKEY"
-    echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&pbk=$PUBKEY&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-$PORT"
+
+    generate_config
+    systemctl restart $XRAY_SERVICE
+
+    echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&pbk=$PUBKEY&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-$DOMAIN"
+}
+
+# 添加 Shadowsocks 节点
+add_ss_node() {
+    read -p "请输入端口（默认10000）: " PORT
+    PORT=${PORT:-10000}
+    
+    # 生成随机密码
+    PASSWORD=$(openssl rand -base64 16)
+    
+    # 支持的加密方式
+    echo "请选择加密方式:"
+    echo "1. aes-256-gcm (推荐)"
+    echo "2. chacha20-poly1305"
+    echo "3. 2022-blake3-aes-256-gcm"
+    
+    read -p "请选择 (1-3, 默认1): " METHOD_CHOICE
+    case $METHOD_CHOICE in
+        2) METHOD="chacha20-poly1305";;
+        3) METHOD="2022-blake3-aes-256-gcm";;
+        *) METHOD="aes-256-gcm";;
+    esac
+
+    # 保存SS配置信息
+    CLIENT_FILE="$SS_DIR/ss_${PORT}.json"
+    cat > "$CLIENT_FILE" <<EOF
+{
+    "port": $PORT,
+    "password": "$PASSWORD",
+    "method": "$METHOD"
+}
+EOF
+
+    echo "Shadowsocks节点已添加"
+    echo "端口: $PORT"
+    echo "密码: $PASSWORD"
+    echo "加密方式: $METHOD"
 
     generate_config
     systemctl restart $XRAY_SERVICE
 }
 
-# 添加 Shadowsocks 节点
-add_ss_node() {
-    read -p "请输入端口（默认24443）: " SS_PORT
-    SS_PORT=${SS_PORT:-24443}
-
-    # 推荐加密方式
-    SS_METHOD="2022-blake3-aes-256-gcm"
-
-    # 密码可自定义，默认随机
-    read -p "请输入密码（留空则自动生成随机密码）: " SS_PASSWORD
-    if [[ -z "$SS_PASSWORD" ]]; then
-        SS_PASSWORD=$(openssl rand 32 | base64 | tr -d '\n')
-    fi
-
-    SERVER_IP=$(get_ip)
-    SS_LINK="ss://$(echo -n "$SS_METHOD:$SS_PASSWORD@$SERVER_IP:$SS_PORT" | base64 -w0)"
-
-    SS_CONFIG_FILE="$UUID_DIR/ss_${SS_PORT}.json"
-    cat > "$SS_CONFIG_FILE" <<EOF
-{
-  "port": $SS_PORT,
-  "password": "$SS_PASSWORD",
-  "method": "$SS_METHOD",
-  "ss_link": "$SS_LINK"
-}
-EOF
-
-    echo "SS 节点已添加："
-    echo "端口: $SS_PORT"
-    echo "密码: $SS_PASSWORD"
-    echo "加密方式: $SS_METHOD"
-    echo "ss 链接: $SS_LINK"
-
-    generate_ss_config
-    systemctl restart $XRAY_SERVICE
-}
-
-# 删除节点（VLESS+Reality 和 Shadowsocks 合并）
+# 删除节点
 remove_node() {
-    echo "现有节点："
-    idx=1
-    declare -A NODE_MAP
-    # 列出VLESS节点
-    for file in $UUID_DIR/*.json; do
-        [[ "$file" == *ss_* ]] && continue
-        [ -e "$file" ] || continue
-        UUID=$(jq -r .uuid "$file")
-        PORT=$(jq -r .port "$file")
-        echo "$idx. VLESS+Reality UUID: $UUID 端口: $PORT"
-        NODE_MAP[$idx]="$file"
-        idx=$((idx+1))
-    done
-    # 列出SS节点
-    for file in $UUID_DIR/ss_*.json; do
-        [ -e "$file" ] || continue
-        PORT=$(jq -r .port "$file")
-        echo "$idx. Shadowsocks 端口: $PORT"
-        NODE_MAP[$idx]="$file"
-        idx=$((idx+1))
-    done
+    echo "请选择要删除的节点类型:"
+    echo "1. VLESS+Reality节点"
+    echo "2. Shadowsocks节点"
+    read -p "请选择 (1-2): " NODE_TYPE
 
-    if [[ $idx -eq 1 ]]; then
-        echo "暂无节点可删除"
-        return
-    fi
-
-    read -p "请输入要删除的节点序号: " DEL_IDX
-    DEL_FILE="${NODE_MAP[$DEL_IDX]}"
-    if [[ -f "$DEL_FILE" ]]; then
-        rm -f "$DEL_FILE"
-        echo "已删除: $DEL_FILE"
-        generate_config
-        generate_ss_config
-        systemctl restart $XRAY_SERVICE
-    else
-        echo "未找到对应节点"
-    fi
+    case $NODE_TYPE in
+        1)
+            echo "现有VLESS节点："
+            ls $UUID_DIR
+            read -p "请输入要删除的UUID: " DEL_UUID
+            FILE_TO_DELETE=$(find $UUID_DIR -type f -name "${DEL_UUID}_*.json")
+            if [[ -f "$FILE_TO_DELETE" ]]; then
+                rm -f "$FILE_TO_DELETE"
+                echo "已删除: $FILE_TO_DELETE"
+                generate_config
+                systemctl restart $XRAY_SERVICE
+            else
+                echo "未找到对应UUID的节点"
+            fi
+            ;;
+        2)
+            echo "现有Shadowsocks节点："
+            ls $SS_DIR
+            read -p "请输入要删除的端口: " DEL_PORT
+            FILE_TO_DELETE="$SS_DIR/ss_${DEL_PORT}.json"
+            if [[ -f "$FILE_TO_DELETE" ]]; then
+                rm -f "$FILE_TO_DELETE"
+                echo "已删除端口为 $DEL_PORT 的SS节点"
+                generate_config
+                systemctl restart $XRAY_SERVICE
+            else
+                echo "未找到对应端口的SS节点"
+            fi
+            ;;
+        *)
+            echo "无效选择"
+            ;;
+    esac
 }
 
 # 查看所有节点
 view_node() {
     echo "【VLESS 节点列表】"
     for file in $UUID_DIR/*.json; do
-        [[ "$file" == *ss_* ]] && continue
         [ -e "$file" ] || continue
         UUID=$(jq -r .uuid "$file")
         DOMAIN=$(jq -r .domain "$file")
@@ -245,43 +251,40 @@ view_node() {
         SERVER_NAME=$(jq -r .server_name "$file")
         PUBKEY=$(jq -r .public_key "$file")
         SHORT_ID=$(jq -r .short_id "$file")
-        if [[ "$UUID" != "null" && "$DOMAIN" != "null" && "$PORT" != "null" && "$SERVER_NAME" != "null" && "$PUBKEY" != "null" && "$SHORT_ID" != "null" ]]; then
-            echo "---"
-            echo "端口: $PORT"
-            echo "UUID: $UUID"
-            echo "Reality 公钥: $PUBKEY"
-            echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&pbk=$PUBKEY&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-$PORT"
-        fi
+        echo "---"
+        echo "端口: $PORT"
+        echo "UUID: $UUID"
+        echo "Reality 公钥: $PUBKEY"
+        echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&pbk=$PUBKEY&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-$PORT"
     done
 
-    echo
-    echo "【Shadowsocks 节点列表】"
-    for file in $UUID_DIR/ss_*.json; do
+    echo -e "\n【Shadowsocks 节点列表】"
+    for file in $SS_DIR/ss_*.json; do
         [ -e "$file" ] || continue
         PORT=$(jq -r .port "$file")
         PASSWORD=$(jq -r .password "$file")
         METHOD=$(jq -r .method "$file")
-        SS_LINK=$(jq -r .ss_link "$file")
+        IP=$(get_ip)
         echo "---"
         echo "端口: $PORT"
         echo "密码: $PASSWORD"
         echo "加密方式: $METHOD"
-        echo "ss 链接: $SS_LINK"
+        echo "服务器地址: $IP"
     done
 }
 
-# ✅ 支持多个端口节点，生成多个 inbounds 配置项
+# 生成配置文件
 generate_config() {
     INBOUNDS="[]"
+    
+    # 处理VLESS节点
     for file in $UUID_DIR/*.json; do
-        [[ "$file" == *ss_* ]] && continue
         [ -f "$file" ] || continue
         UUID=$(jq -r .uuid "$file")
         PORT=$(jq -r .port "$file")
         SERVER_NAME=$(jq -r .server_name "$file")
         PRIVKEY=$(jq -r .private_key "$file")
         SHORT_ID=$(jq -r .short_id "$file")
-        PUBKEY=$(jq -r .public_key "$file")
         SHORT_IDS="[\"$SHORT_ID\"]"
         CLIENT="[{\"id\": \"$UUID\", \"flow\": \"xtls-rprx-vision\"}]"
 
@@ -312,65 +315,39 @@ EOF
         INBOUNDS=$(echo "$INBOUNDS" | jq ". + [$INBOUND]")
     done
 
-    # 写入配置文件
-    cat > $XRAY_CONFIG_PATH <<EOF
-{
-  "inbounds": $INBOUNDS,
-  "outbounds": [
-    {
-      "protocol": "freedom"
-    }
-  ]
-}
-EOF
-}
-
-# 生成 Shadowsocks 配置
-generate_ss_config() {
-    INBOUNDS="[]"
-    declare -A PORT_TRACKER  # 用于跟踪已处理的端口，避免重复
-
-    for file in $UUID_DIR/ss_*.json; do
+    # 处理Shadowsocks节点
+    for file in $SS_DIR/ss_*.json; do
         [ -f "$file" ] || continue
         PORT=$(jq -r .port "$file")
         PASSWORD=$(jq -r .password "$file")
         METHOD=$(jq -r .method "$file")
 
-        # 检查端口是否已处理过
-        if [[ -n "${PORT_TRACKER[$PORT]}" ]]; then
-            echo "警告：端口 $PORT 已存在，跳过重复配置"
-            continue
-        fi
-        PORT_TRACKER[$PORT]=1  # 标记端口为已处理
-
-        INBOUND=$(cat <<EOF
+        SS_INBOUND=$(cat <<EOF
 {
-  "port": $PORT,
-  "protocol": "shadowsocks",
-  "settings": {
-    "method": "$METHOD",
-    "password": "$PASSWORD",
-    "network": "tcp,udp"
-  }
+    "port": $PORT,
+    "protocol": "shadowsocks",
+    "settings": {
+        "method": "$METHOD",
+        "password": "$PASSWORD"
+    },
+    "streamSettings": {
+        "network": "tcp"
+    }
 }
 EOF
 )
-        INBOUNDS=$(echo "$INBOUNDS" | jq ". + [$INBOUND]")
+        INBOUNDS=$(echo "$INBOUNDS" | jq ". + [$SS_INBOUND]")
     done
-
-    # 合并 VLESS 和 SS 配置
-    VLESS_INBOUNDS=$(jq -r .inbounds $XRAY_CONFIG_PATH 2>/dev/null || echo "[]")
-    MERGED_INBOUNDS=$(echo "$VLESS_INBOUNDS" | jq ". + $INBOUNDS")
 
     # 写入配置文件
     cat > $XRAY_CONFIG_PATH <<EOF
 {
-  "inbounds": $MERGED_INBOUNDS,
-  "outbounds": [
-    {
-      "protocol": "freedom"
-    }
-  ]
+    "inbounds": $INBOUNDS,
+    "outbounds": [
+        {
+            "protocol": "freedom"
+        }
+    ]
 }
 EOF
 }
@@ -450,7 +427,7 @@ delete_script() {
 
 # 主菜单
 show_menu() {
-    echo "================ Reality 士大夫士大夫管理菜单 ========"
+    echo "================ Reality 管理菜单 ========"
     echo " 1.   添加VLESS+reality节点"
     echo " 2.   添加Shadowsocks节点"
     echo " 3.   删除节点"
@@ -480,7 +457,7 @@ show_menu() {
     echo " ======================================="
 }
 
-# 安装依赖函数
+# 安装依赖
 install_deps() {
     DEPS=(curl jq iptables iptables-persistent netfilter-persistent openssl unzip)
     MISSING=()
@@ -496,6 +473,7 @@ install_deps() {
     fi
 }
 
+# 主循环
 while true; do
     show_menu
     read -p "请输入选项: " choice
@@ -533,8 +511,3 @@ while true; do
     esac
     echo ""
 done
-
-# 添加 lamb 快捷方式（仅执行一次即可）
-cp "$(realpath "$0")" /usr/local/bin/lamb
-chmod +x /usr/local/bin/lamb
-echo "你现在可以通过命令 'lamb' 来运行此脚本"
