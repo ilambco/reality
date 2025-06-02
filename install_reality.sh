@@ -148,13 +148,12 @@ EOF
 
     echo "节点已添加，UUID: $UUID"
     echo "Reality 公钥: $PUBKEY"
+    echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&pbk=$PUBKEY&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-$PORT"
 
     generate_config
     systemctl restart $XRAY_SERVICE
-
-    echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&pbk=$PUBKEY&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-$DOMAIN"
 }
-
+# 删除 VLESS+REALITY 节点
 remove_node() {
     echo "现有节点："
     ls $UUID_DIR
