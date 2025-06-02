@@ -450,7 +450,7 @@ delete_script() {
 
 # 主菜单
 show_menu() {
-    echo "================ Reality 管理菜单 ========"
+    echo "================ Reality 士大夫士大夫管理菜单 ========"
     echo " 1.   添加VLESS+reality节点"
     echo " 2.   添加Shadowsocks节点"
     echo " 3.   删除节点"
