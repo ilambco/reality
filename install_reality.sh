@@ -153,19 +153,83 @@ EOF
     generate_config
     systemctl restart $XRAY_SERVICE
 }
-# 删除 VLESS+REALITY 节点
+
+# 添加 Shadowsocks 节点
+add_ss_node() {
+    read -p "请输入端口（默认24443）: " SS_PORT
+    SS_PORT=${SS_PORT:-24443}
+
+    # 推荐加密方式
+    SS_METHOD="2022-blake3-aes-256-gcm"
+
+    # 密码可自定义，默认随机
+    read -p "请输入密码（留空则自动生成随机密码）: " SS_PASSWORD
+    if [[ -z "$SS_PASSWORD" ]]; then
+        SS_PASSWORD=$(openssl rand -base64 16)
+    fi
+
+    SERVER_IP=$(get_ip)
+    SS_LINK="ss://$(echo -n "$SS_METHOD:$SS_PASSWORD@$SERVER_IP:$SS_PORT" | base64 -w0)"
+
+    SS_CONFIG_FILE="$UUID_DIR/ss_${SS_PORT}.json"
+    cat > "$SS_CONFIG_FILE" <<EOF
+{
+  "port": $SS_PORT,
+  "password": "$SS_PASSWORD",
+  "method": "$SS_METHOD",
+  "ss_link": "$SS_LINK"
+}
+EOF
+
+    echo "SS 节点已添加："
+    echo "端口: $SS_PORT"
+    echo "密码: $SS_PASSWORD"
+    echo "加密方式: $SS_METHOD"
+    echo "ss 链接: $SS_LINK"
+
+    generate_ss_config
+    systemctl restart $XRAY_SERVICE
+}
+
+# 删除节点（VLESS+Reality 和 Shadowsocks 合并）
 remove_node() {
     echo "现有节点："
-    ls $UUID_DIR
-    read -p "请输入要删除的UUID: " DEL_UUID
-    FILE_TO_DELETE=$(find $UUID_DIR -type f -name "${DEL_UUID}_*.json")
-    if [[ -f "$FILE_TO_DELETE" ]]; then
-        rm -f "$FILE_TO_DELETE"
-        echo "已删除: $FILE_TO_DELETE"
+    idx=1
+    declare -A NODE_MAP
+    # 列出VLESS节点
+    for file in $UUID_DIR/*.json; do
+        [[ "$file" == *ss_* ]] && continue
+        [ -e "$file" ] || continue
+        UUID=$(jq -r .uuid "$file")
+        PORT=$(jq -r .port "$file")
+        echo "$idx. VLESS+Reality UUID: $UUID 端口: $PORT"
+        NODE_MAP[$idx]="$file"
+        idx=$((idx+1))
+    done
+    # 列出SS节点
+    for file in $UUID_DIR/ss_*.json; do
+        [ -e "$file" ] || continue
+        PORT=$(jq -r .port "$file")
+        echo "$idx. Shadowsocks 端口: $PORT"
+        NODE_MAP[$idx]="$file"
+        idx=$((idx+1))
+    done
+
+    if [[ $idx -eq 1 ]]; then
+        echo "暂无节点可删除"
+        return
+    fi
+
+    read -p "请输入要删除的节点序号: " DEL_IDX
+    DEL_FILE="${NODE_MAP[$DEL_IDX]}"
+    if [[ -f "$DEL_FILE" ]]; then
+        rm -f "$DEL_FILE"
+        echo "已删除: $DEL_FILE"
         generate_config
+        generate_ss_config
         systemctl restart $XRAY_SERVICE
     else
-        echo "未找到对应UUID的节点"
+        echo "未找到对应节点"
     fi
 }
 
@@ -181,11 +245,13 @@ view_node() {
         SERVER_NAME=$(jq -r .server_name "$file")
         PUBKEY=$(jq -r .public_key "$file")
         SHORT_ID=$(jq -r .short_id "$file")
-        echo "---"
-        echo "端口: $PORT"
-        echo "UUID: $UUID"
-        echo "Reality 公钥: $PUBKEY"
-        echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&pbk=$PUBKEY&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-$PORT"
+        if [[ "$UUID" != "null" && "$DOMAIN" != "null" && "$PORT" != "null" && "$SERVER_NAME" != "null" && "$PUBKEY" != "null" && "$SHORT_ID" != "null" ]]; then
+            echo "---"
+            echo "端口: $PORT"
+            echo "UUID: $UUID"
+            echo "Reality 公钥: $PUBKEY"
+            echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&pbk=$PUBKEY&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-$PORT"
+        fi
     done
 
     echo
@@ -208,6 +274,7 @@ view_node() {
 generate_config() {
     INBOUNDS="[]"
     for file in $UUID_DIR/*.json; do
+        [[ "$file" == *ss_* ]] && continue
         [ -f "$file" ] || continue
         UUID=$(jq -r .uuid "$file")
         PORT=$(jq -r .port "$file")
@@ -256,59 +323,6 @@ EOF
   ]
 }
 EOF
-}
-
-# 添加 Shadowsocks 节点
-add_ss_node() {
-    read -p "请输入端口（默认9885）: " SS_PORT
-    SS_PORT=${SS_PORT:-9885}
-
-    # 推荐加密方式
-    SS_METHOD="2022-blake3-aes-256-gcm"
-
-    # 密码可自定义，默认随机
-    read -p "请输入密码（留空则自动生成随机密码）: " SS_PASSWORD
-    if [[ -z "$SS_PASSWORD" ]]; then
-        SS_PASSWORD=$(openssl rand -base64 16)
-    fi
-
-    SERVER_IP=$(get_ip)
-    SS_LINK="ss://$(echo -n "$SS_METHOD:$SS_PASSWORD@$SERVER_IP:$SS_PORT" | base64 -w0)"
-
-    SS_CONFIG_FILE="$UUID_DIR/ss_${SS_PORT}.json"
-    cat > "$SS_CONFIG_FILE" <<EOF
-{
-  "port": $SS_PORT,
-  "password": "$SS_PASSWORD",
-  "method": "$SS_METHOD",
-  "ss_link": "$SS_LINK"
-}
-EOF
-
-    echo "SS 节点已添加："
-    echo "端口: $SS_PORT"
-    echo "密码: $SS_PASSWORD"
-    echo "加密方式: $SS_METHOD"
-    echo "ss 链接: $SS_LINK"
-
-    generate_ss_config
-    systemctl restart $XRAY_SERVICE
-}
-
-# 删除 Shadowsocks 节点
-remove_ss_node() {
-    echo "现有 SS 节点："
-    ls $UUID_DIR/ss_*.json 2>/dev/null
-    read -p "请输入要删除的端口: " DEL_PORT
-    SS_FILE="$UUID_DIR/ss_${DEL_PORT}.json"
-    if [[ -f "$SS_FILE" ]]; then
-        rm -f "$SS_FILE"
-        echo "已删除 SS 节点，端口: $DEL_PORT"
-        generate_ss_config
-        systemctl restart $XRAY_SERVICE
-    else
-        echo "未找到对应端口的 SS 节点"
-    fi
 }
 
 # 生成 Shadowsocks 配置
@@ -428,32 +442,31 @@ delete_script() {
 # 主菜单
 show_menu() {
     echo "================ Reality 管理菜单 ========"
-    echo " 1.   添加VLESS节点"
-    echo " 2.   删除VLESS节点"
-    echo " 3.   添加SS节点"
-    echo " 4.   删除SS节点"
-    echo " 5.   查看节点"
+    echo " 1.   添加VLESS+reality节点"
+    echo " 2.   添加Shadowsocks节点"
+    echo " 3.   删除节点"
+    echo " 4.   查看节点"
     echo " --------------- 端口转发 ---------------"
-    echo " 6.   添加端口转发"
-    echo " 7.   删除端口转发"
-    echo " 8.   查看端口转发"
+    echo " 5.   添加端口转发"
+    echo " 6.   删除端口转发"
+    echo " 7.   查看端口转发"
     echo " --------------- Xray 管理 ---------------"
-    echo " 9.   安装/启用"
-    echo " 10.  停止"
-    echo " 11.  查看状态"
-    echo " 12.  卸载"
+    echo " 8.   安装/启用"
+    echo " 9.   停止"
+    echo " 10.  查看状态"
+    echo " 11.  卸载"
     echo " --------------- UFW 管理 ---------------"
-    echo " 13.  安装/启用"
-    echo " 14.  关闭"
-    echo " 15.  开放端口"
-    echo " 16.  查看规则"
+    echo " 12.  安装/启用"
+    echo " 13.  关闭"
+    echo " 14.  开放端口"
+    echo " 15.  查看规则"
     echo " --------------- BBR 管理 ---------------"
-    echo " 17.  安装/启用"
-    echo " 18.  关闭"
-    echo " 19.  查看状态"
+    echo " 16.  安装/启用"
+    echo " 17.  关闭"
+    echo " 18.  查看状态"
     echo " --------------- 脚本管理 ---------------"
-    echo " 20.  安装依赖"
-    echo " 21.  删除脚本"
+    echo " 19.  安装依赖"
+    echo " 20.  删除脚本"
     echo " 0.   退出"
     echo " ======================================="
 }
@@ -479,34 +492,33 @@ while true; do
     read -p "请输入选项: " choice
     case $choice in
         1) add_node;;
-        2) remove_node;;
-        3) add_ss_node;;
-        4) remove_ss_node;;
-        5) view_node;;
-        6) add_port_forward;;
-        7) remove_port_forward;;
-        8) list_port_forward;;
-        9)
+        2) add_ss_node;;
+        3) remove_node;;
+        4) view_node;;
+        5) add_port_forward;;
+        6) remove_port_forward;;
+        7) list_port_forward;;
+        8)
             if [[ ! -f $XRAY_BIN ]]; then
                 install_xray
             fi
             start_xray
             ;;
-        10) stop_xray;;
-        11) status_xray;;
-        12) uninstall_xray;;
-        13)
+        9) stop_xray;;
+        10) status_xray;;
+        11) uninstall_xray;;
+        12)
             dpkg -s iptables-persistent &>/dev/null || install_firewall
             start_firewall
             ;;
-        14) stop_firewall;;
-        15) add_firewall_rule;;
-        16) status_firewall;;
-        17) install_bbr;;
-        18) disable_bbr;;
-        19) status_bbr;;
-        20) install_deps;;
-        21) delete_script;;
+        13) stop_firewall;;
+        14) add_firewall_rule;;
+        15) status_firewall;;
+        16) install_bbr;;
+        17) disable_bbr;;
+        18) status_bbr;;
+        19) install_deps;;
+        20) delete_script;;
         0) exit;;
         *) echo "无效选项，请重新输入";;
     esac
