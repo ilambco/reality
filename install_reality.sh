@@ -279,87 +279,81 @@ generate_config() {
         INBOUNDS=$(echo "$INBOUNDS" | jq ". + [$INBOUND]")
     done
 
-        # 修改generate_config函数中的SS节点处理部分
-    generate_config() {
-        INBOUNDS="[]"
-        
-        # ...existing VLESS部分保持不变...
-    
-        # 处理 Shadowsocks 节点
-        for file in $SS_DIR/ss_*.json; do
-            [ -f "$file" ] || continue
-            # 读取配置并检查有效性
-            PORT=$(jq -r '.port' "$file")
-            PASSWORD=$(jq -r '.settings.password' "$file")
-            METHOD=$(jq -r '.settings.method' "$file")
-    
-            # 确保值不为null
-            if [[ "$PASSWORD" == "null" || "$METHOD" == "null" ]]; then
-                echo "警告: 跳过无效的SS配置文件: $file"
-                continue
-            }
-    
-            SS_INBOUND=$(cat <<EOF
-    {
-        "port": $PORT,
-        "protocol": "shadowsocks",
-        "settings": {
-            "method": "$METHOD",
-            "password": "$PASSWORD",
-            "network": "tcp,udp",
-            "ivCheck": false
-        },
-        "streamSettings": {
-            "network": "tcp",
-            "security": "none",
-            "tcpSettings": {
-                "acceptProxyProtocol": false,
-                "header": {
-                    "type": "none"
-                }
-            }
-        },
-        "sniffing": {
-            "enabled": false,
-            "destOverride": [
-                "http",
-                "tls",
-                "quic",
-                "fakedns"
-            ],
-            "metadataOnly": false,
-            "routeOnly": false
+    # 处理 Shadowsocks 节点
+    for file in $SS_DIR/ss_*.json; do
+        [ -f "$file" ] || continue
+        # 读取配置并检查有效性
+        PORT=$(jq -r '.port' "$file")
+        PASSWORD=$(jq -r '.settings.password' "$file")
+        METHOD=$(jq -r '.settings.method' "$file")
+
+        # 确保值不为null
+        if [[ "$PASSWORD" == "null" || "$METHOD" == "null" ]]; then
+            echo "警告: 跳过无效的SS配置文件: $file"
+            continue
         }
-    }
-    EOF
-    )
-            INBOUNDS=$(echo "$INBOUNDS" | jq ". + [$SS_INBOUND]")
-        done
-    
-        # 写入配置文件之前检查配置是否有效
-        if [[ $(echo "$INBOUNDS" | jq 'length') -eq 0 ]]; then
-            echo "错误: 没有有效的节点配置"
-            return 1
-        fi
-    
-        # 写入配置文件
-        cat > $XRAY_CONFIG_PATH <<EOF
-    {
-        "inbounds": $INBOUNDS,
-        "outbounds": [
-            {
-                "protocol": "freedom"
+
+        SS_INBOUND=$(cat <<EOF
+{
+    "port": $PORT,
+    "protocol": "shadowsocks",
+    "settings": {
+        "method": "$METHOD",
+        "password": "$PASSWORD",
+        "network": "tcp,udp",
+        "ivCheck": false
+    },
+    "streamSettings": {
+        "network": "tcp",
+        "security": "none",
+        "tcpSettings": {
+            "acceptProxyProtocol": false,
+            "header": {
+                "type": "none"
             }
-        ]
+        }
+    },
+    "sniffing": {
+        "enabled": false,
+        "destOverride": [
+            "http",
+            "tls",
+            "quic",
+            "fakedns"
+        ],
+        "metadataOnly": false,
+        "routeOnly": false
     }
-    EOF
-    
-        # 验证配置文件
-        if ! $XRAY_BIN -test -config $XRAY_CONFIG_PATH; then
-            echo "错误: Xray 配置文件验证失败"
-            return 1
-        fi
-    }
+}
+EOF
+)
+        INBOUNDS=$(echo "$INBOUNDS" | jq ". + [$SS_INBOUND]")
+    done
+
+    # 写入配置文件之前检查配置是否有效
+    if [[ $(echo "$INBOUNDS" | jq 'length') -eq 0 ]]; then
+        echo "错误: 没有有效的节点配置"
+        return 1
+    fi
+
+    # 写入配置文件
+    cat > $XRAY_CONFIG_PATH <<EOF
+{
+    "inbounds": $INBOUNDS,
+    "outbounds": [
+        {
+            "protocol": "freedom"
+        }
+    ]
+}
+EOF
+
+    # 验证配置文件
+    if ! $XRAY_BIN -test -config $XRAY_CONFIG_PATH; then
+        echo "错误: Xray 配置文件验证失败"
+        return 1
+    fi
+}
 
 # 主菜单
 show_menu() {
