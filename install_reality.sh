@@ -1,5 +1,4 @@
 #!/bin/bash
-
 # 自动创建 lamb 快捷方式（首次运行时执行）
 if [[ "$(realpath $0)" != "/usr/local/bin/lamb" ]] && [[ ! -f /usr/local/bin/lamb ]]; then
     cp "$(realpath $0)" /usr/local/bin/lamb
@@ -23,12 +22,6 @@ SS_DIR="/usr/local/etc/xray/ss_clients"
 # 一次性创建目录 
 mkdir -p "$UUID_DIR"
 mkdir -p "$SS_DIR"
-
-# base64 编码函数
-urlsafe_base64_encode() {
-    local str=$1
-    echo -n "$str" | base64 -w 0 | tr '+/' '-_' | tr -d '='
-}
 
 # 获取公网 IP
 get_ip() {
@@ -124,22 +117,54 @@ disable_bbr() {
     echo "BBR 配置已移除"
 }
 
-# 修改base64编码函数
-urlsafe_base64_encode() {
-    local str=$1
-    echo -n "$str" | base64 -w 0 | tr '+/' '-_' | tr -d '='
+# 添加 VLESS+REALITY 节点
+add_node() {
+    mkdir -p "$UUID_DIR"
+    read -p "请输入域名或IP（默认使用本机IP）:" DOMAIN
+    DOMAIN=${DOMAIN:-$(get_ip)}
+
+    read -p "请输入端口（默认443）: " PORT
+    PORT=${PORT:-443}
+
+    read -p "请输入伪装域名（默认itunes.apple.com）: " SERVER_NAME
+    SERVER_NAME=${SERVER_NAME:-itunes.apple.com}
+
+    UUID=$($XRAY_BIN uuid)
+    KEYS=$($XRAY_BIN x25519)
+    PRIVKEY=$(echo "$KEYS" | grep Private | awk '{print $3}')
+    PUBKEY=$(echo "$KEYS" | grep Public | awk '{print $3}')
+    SHORT_ID=$(openssl rand -hex 2)
+
+    CLIENT_FILE="$UUID_DIR/${UUID}_${PORT}.json"
+    cat > "$CLIENT_FILE" <<EOF
+{
+  "uuid": "$UUID",
+  "port": $PORT,
+  "domain": "$DOMAIN",
+  "server_name": "$SERVER_NAME",
+  "private_key": "$PRIVKEY",
+  "public_key": "$PUBKEY",
+  "short_id": "$SHORT_ID"
+}
+EOF
+
+    echo "节点已添加，UUID: $UUID"
+    echo "Reality 公钥: $PUBKEY"
+
+    generate_config
+    systemctl restart $XRAY_SERVICE
+
+    echo "vless://$UUID@$DOMAIN:$PORT?type=tcp&security=reality&pbk=$PUBKEY&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-$DOMAIN"
 }
 
 # 添加 Shadowsocks 节点
 add_ss_node() {
+    mkdir -p "$SS_DIR"
     read -p "请输入端口（默认10000）: " PORT
     PORT=${PORT:-10000}
-    
-    # 生成随机密码
-    PASSWORD=$(openssl rand -base64 32)
     METHOD="2022-blake3-aes-256-gcm"
-
-    # 保存SS配置信息
+    # 生成32字节原始密钥并base64编码（44位）
+    PASSWORD=$(head -c 32 /dev/urandom | base64 | tr -d '\n')
     CLIENT_FILE="$SS_DIR/ss_${PORT}.json"
     cat > "$CLIENT_FILE" <<EOF
 {
@@ -149,7 +174,6 @@ add_ss_node() {
 }
 EOF
 
-    # 生成SS URL链接
     IP=$(get_ip)
     USERINFO=$(echo -n "${METHOD}:${PASSWORD}" | base64 -w 0)
     SS_URL="ss://${USERINFO}@${IP}:${PORT}#SS-${PORT}"
@@ -225,6 +249,7 @@ view_node() {
     done
 
     echo -e "\n【Shadowsocks 节点列表】"
+    echo "默认加密方式为：2022-blake3-aes-256-gcm"
     for file in $SS_DIR/ss_*.json; do
         [ -e "$file" ] || continue
         PORT=$(jq -r .port "$file")
@@ -243,27 +268,55 @@ view_node() {
 # 生成配置文件
 generate_config() {
     INBOUNDS="[]"
-    
-    # 处理VLESS节点
+    # VLESS
     for file in $UUID_DIR/*.json; do
         [ -f "$file" ] || continue
-        # ...此处省略VLESS节点处理逻辑...
-        # INBOUNDS=$(echo "$INBOUNDS" | jq ". + [$INBOUND]")
+        UUID=$(jq -r .uuid "$file")
+        PORT=$(jq -r .port "$file")
+        SERVER_NAME=$(jq -r .server_name "$file")
+        PRIVKEY=$(jq -r .private_key "$file")
+        SHORT_ID=$(jq -r .short_id "$file")
+        PUBKEY=$(jq -r .public_key "$file")
+        SHORT_IDS="[\"$SHORT_ID\"]"
+        CLIENT="[{\"id\": \"$UUID\", \"flow\": \"xtls-rprx-vision\"}]"
+
+        INBOUND=$(cat <<EOF
+{
+  "port": $PORT,
+  "protocol": "vless",
+  "settings": {
+    "clients": $CLIENT,
+    "decryption": "none",
+    "fallbacks": []
+  },
+  "streamSettings": {
+    "network": "tcp",
+    "security": "reality",
+    "realitySettings": {
+      "show": false,
+      "dest": "$SERVER_NAME:443",
+      "xver": 0,
+      "serverNames": ["$SERVER_NAME"],
+      "privateKey": "$PRIVKEY",
+      "shortIds": $SHORT_IDS
+    }
+  }
+}
+EOF
+)
+        INBOUNDS=$(echo "$INBOUNDS" | jq ". + [$INBOUND]")
     done
 
-    # 处理 Shadowsocks 节点
+    # Shadowsocks
     for file in $SS_DIR/ss_*.json; do
         [ -f "$file" ] || continue
         PORT=$(jq -r .port "$file")
         PASSWORD=$(jq -r .password "$file")
         METHOD=$(jq -r .method "$file")
-
-        # 跳过无效配置
         if [[ "$PASSWORD" == "null" || "$METHOD" == "null" ]]; then
             echo "警告: 跳过无效的SS配置文件: $file"
             continue
         fi
-
         SS_INBOUND=$(cat <<EOF
 {
     "port": $PORT,
@@ -301,29 +354,90 @@ EOF
         INBOUNDS=$(echo "$INBOUNDS" | jq ". + [$SS_INBOUND]")
     done
 
-    # 写入配置文件之前检查配置是否有效
-    if [[ $(echo "$INBOUNDS" | jq 'length') -eq 0 ]]; then
-        echo "错误: 没有有效的节点配置"
-        return 1
-    fi
-
     # 写入配置文件
     cat > $XRAY_CONFIG_PATH <<EOF
 {
-    "inbounds": $INBOUNDS,
-    "outbounds": [
-        {
-            "protocol": "freedom"
-        }
-    ]
+  "inbounds": $INBOUNDS,
+  "outbounds": [
+    {
+      "protocol": "freedom"
+    }
+  ]
 }
 EOF
+}
 
-    # 验证配置文件
-    if ! $XRAY_BIN -test -config $XRAY_CONFIG_PATH; then
-        echo "错误: Xray 配置文件验证失败"
-        return 1
+# 端口转发规则文件
+PORT_FORWARD_FILE="/usr/local/etc/xray/port_forward_rules.txt"
+
+# 添加端口转发规则
+add_port_forward() {
+    read -p "请输入目标 IP 或域名: " TARGET_IP
+    [ -z "$TARGET_IP" ] && echo "目标 IP 不能为空" && return
+
+    read -p "请输入目标端口: " TARGET_PORT
+    [[ ! "$TARGET_PORT" =~ ^[0-9]+$ ]] && echo "目标端口无效" && return
+
+    read -p "请输入本地转发端口（默认与目标端口相同）: " LOCAL_PORT
+    LOCAL_PORT=${LOCAL_PORT:-$TARGET_PORT}
+
+    grep -q "^$LOCAL_PORT $TARGET_IP $TARGET_PORT$" "$PORT_FORWARD_FILE" 2>/dev/null
+    if [[ $? -eq 0 ]]; then
+        echo "该转发规则已存在"
+        return
     fi
+
+    iptables -t nat -A PREROUTING -p tcp --dport "$LOCAL_PORT" -j DNAT --to-destination "$TARGET_IP:$TARGET_PORT"
+    iptables -t nat -A POSTROUTING -j MASQUERADE
+    echo "$LOCAL_PORT $TARGET_IP $TARGET_PORT" >> "$PORT_FORWARD_FILE"
+    netfilter-persistent save
+    echo "端口转发已添加: 本地 $LOCAL_PORT -> $TARGET_IP:$TARGET_PORT"
+}
+
+# 删除端口转发规则
+remove_port_forward() {
+    read -p "请输入目标 IP 或域名: " TARGET_IP
+    [ -z "$TARGET_IP" ] && echo "目标 IP 不能为空" && return
+
+    read -p "请输入目标端口: " TARGET_PORT
+    [[ ! "$TARGET_PORT" =~ ^[0-9]+$ ]] && echo "目标端口无效" && return
+
+    MATCH_LINE=$(grep " $TARGET_IP $TARGET_PORT$" "$PORT_FORWARD_FILE" 2>/dev/null)
+    if [[ -z "$MATCH_LINE" ]]; then
+        echo "未找到该端口转发规则"
+        return
+    fi
+
+    LOCAL_PORT=$(echo "$MATCH_LINE" | awk '{print $1}')
+    iptables -t nat -D PREROUTING -p tcp --dport "$LOCAL_PORT" -j DNAT --to-destination "$TARGET_IP:$TARGET_PORT"
+    iptables -t nat -D POSTROUTING -j MASQUERADE
+    sed -i "\|^$LOCAL_PORT $TARGET_IP $TARGET_PORT$|d" "$PORT_FORWARD_FILE"
+    netfilter-persistent save
+    echo "已删除转发: 本地 $LOCAL_PORT -> $TARGET_IP:$TARGET_PORT"
+}
+
+# 查看所有端口转发规则
+list_port_forward() {
+    echo "当前端口转发规则:"
+    if [[ ! -s "$PORT_FORWARD_FILE" ]]; then
+        echo "暂无端口转发配置"
+        return
+    fi
+    while read -r line; do
+        LOCAL_PORT=$(echo "$line" | awk '{print $1}')
+        TARGET_IP=$(echo "$line" | awk '{print $2}')
+        TARGET_PORT=$(echo "$line" | awk '{print $3}')
+        echo "本地端口: $LOCAL_PORT -> $TARGET_IP:$TARGET_PORT"
+    done < "$PORT_FORWARD_FILE"
+}
+
+# 删除脚本本体和快捷方式
+delete_script() {
+    echo "即将删除脚本和快捷指令..."
+    rm -f /root/install_reality.sh
+    rm -f /usr/local/bin/lamb
+    echo "脚本和 lamb 快捷方式已删除"
+    exit
 }
 
 # 主菜单
@@ -374,16 +488,6 @@ install_deps() {
     fi
 }
 
-# 删除脚本本体和快捷方式
-delete_script() {
-    echo "即将删除脚本和快捷指令..."
-    rm -f /root/install_reality.sh
-    rm -f /usr/local/bin/lamb
-    echo "脚本和 lamb 快捷方式已删除"
-    exit
-}
-
-# 主循环
 while true; do
     show_menu
     read -p "请输入选项: " choice
