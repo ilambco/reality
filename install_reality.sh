@@ -418,7 +418,7 @@ delete_script() {
 
 # 主菜单
 show_menu() {
-    echo "================ Reality 管理菜单V1.0.0 ========"
+    echo "================ Reality 管理菜单V1.0.1 ========"
     echo " 1.   添加VLESS+reality节点"
     echo " 2.   添加Shadowsocks节点"
     echo " 3.   删除节点"
