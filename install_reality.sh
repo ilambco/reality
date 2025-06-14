@@ -126,7 +126,7 @@ disable_bbr() {
 
 # 添加 VLESS+REALITY 节点
 add_node() {
-    mkdir -p "$UUID_DIR" || { echo "无法创建目录 $UUID_DIR"; exit 1; }
+    mkdir -p "$UUID_DIR"
     read -p "请输入域名或IP（默认使用本机IP）:" DOMAIN
     DOMAIN=${DOMAIN:-$(get_ip)}
 
@@ -159,7 +159,7 @@ EOF
     echo "Reality 公钥: $PUBKEY"
 
     generate_config
-    systemctl restart $XRAY_SERVICE || { echo "重启 Xray 服务失败"; exit 1; }
+    systemctl restart $XRAY_SERVICE
 
     echo "vless://$UUID@$DOMAIN:$VLESS_PORT?type=tcp&security=reality&pbk=$PUBKEY&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-$DOMAIN"
 }
@@ -271,115 +271,13 @@ view_node() {
     done
 }
 
-# 生成配置文件
-generate_config() {
-    INBOUNDS="[]"
-    # VLESS
-    for file in $UUID_DIR/*.json; do
-        [ -f "$file" ] || continue
-        UUID=$(jq -r .uuid "$file")
-        PORT=$(jq -r .port "$file")
-        SERVER_NAME=$(jq -r .server_name "$file")
-        PRIVKEY=$(jq -r .private_key "$file")
-        SHORT_ID=$(jq -r .short_id "$file")
-        PUBKEY=$(jq -r .public_key "$file")
-        SHORT_IDS="[\"$SHORT_ID\"]"
-        CLIENT="[{\"id\": \"$UUID\", \"flow\": \"xtls-rprx-vision\"}]"
-
-        INBOUND=$(cat <<EOF
-{
-  "port": $PORT,
-  "protocol": "vless",
-  "settings": {
-    "clients": $CLIENT,
-    "decryption": "none",
-    "fallbacks": []
-  },
-  "streamSettings": {
-    "network": "tcp",
-    "security": "reality",
-    "realitySettings": {
-      "show": false,
-      "dest": "$SERVER_NAME:443",
-      "xver": 0,
-      "serverNames": ["$SERVER_NAME"],
-      "privateKey": "$PRIVKEY",
-      "shortIds": $SHORT_IDS
-    }
-  }
-}
-EOF
-)
-        INBOUNDS=$(echo "$INBOUNDS" | jq ". + [$INBOUND]")
-    done
-
-    # Shadowsocks
-    for file in $SS_DIR/ss_*.json; do
-        [ -f "$file" ] || continue
-        PORT=$(jq -r .port "$file")
-        PASSWORD=$(jq -r .password "$file")
-        METHOD=$(jq -r .method "$file")
-        if [[ "$PASSWORD" == "null" || "$METHOD" == "null" ]]; then
-            echo "警告: 跳过无效的SS配置文件: $file"
-            continue
-        fi
-        SS_INBOUND=$(cat <<EOF
-{
-    "port": $PORT,
-    "protocol": "shadowsocks",
-    "settings": {
-        "method": "$METHOD",
-        "password": "$PASSWORD",
-        "network": "tcp,udp",
-        "ivCheck": false
-    },
-    "streamSettings": {
-        "network": "tcp",
-        "security": "none",
-        "tcpSettings": {
-            "acceptProxyProtocol": false,
-            "header": {
-                "type": "none"
-            }
-        }
-    },
-    "sniffing": {
-        "enabled": false,
-        "destOverride": [
-            "http",
-            "tls",
-            "quic",
-            "fakedns"
-        ],
-        "metadataOnly": false,
-        "routeOnly": false
-    }
-}
-EOF
-)
-        INBOUNDS=$(echo "$INBOUNDS" | jq ". + [$SS_INBOUND]")
-    done
-
-    echo "$INBOUNDS" | jq . >/dev/null 2>&1 || { echo "生成的 JSON 配置无效"; exit 1; }
-    cat > $XRAY_CONFIG_PATH <<EOF
-{
-  "inbounds": $INBOUNDS,
-  "outbounds": [
-    {
-      "protocol": "freedom"
-    }
-  ]
-}
-EOF
-}
-
 # 添加 dokodemo-door 节点
 add_dokodemo_node() {
     read -p "请输入中转机监听端口（例如 12345）: " DOKO_PORT
     read -p "请输入落地机 IP 地址: " DEST_IP
     read -p "请输入落地机服务端口（例如 443）: " DEST_PORT
-    read -p "请输入网络类型（默认 tcp,udp）: " NETWORK_TYPE
-    NETWORK_TYPE=${NETWORK_TYPE:-tcp,udp}
+    read -p "请输入网络类型（tcp 或 udp，默认 tcp）: " NETWORK_TYPE
+    NETWORK_TYPE=${NETWORK_TYPE:-tcp}
 
     CLIENT_FILE="$UUID_DIR/dokodemo_${DOKO_PORT}.json"
     cat > "$CLIENT_FILE" <<EOF
@@ -576,7 +474,7 @@ delete_script() {
 
 # 主菜单
 show_menu() {
-    echo "================ Reality 管理菜单V1.0.5 ========"
+    echo "================ Reality 管理菜单V1.0.2 ========"
     echo " 1.   添加VLESS+reality节点"
     echo " 2.   添加Shadowsocks节点"
     echo " 3.   删除节点"
