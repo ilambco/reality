@@ -378,8 +378,8 @@ add_dokodemo_node() {
     read -p "请输入中转机监听端口（例如 12345）: " DOKO_PORT
     read -p "请输入落地机 IP 地址: " DEST_IP
     read -p "请输入落地机服务端口（例如 443）: " DEST_PORT
-    read -p "请输入网络类型（tcp 或 udp，默认 tcp）: " NETWORK_TYPE
-    NETWORK_TYPE=${NETWORK_TYPE:-tcp}
+    read -p "请输入网络类型（默认 tcp,udp）: " NETWORK_TYPE
+    NETWORK_TYPE=${NETWORK_TYPE:-tcp,udp}
 
     CLIENT_FILE="$UUID_DIR/dokodemo_${DOKO_PORT}.json"
     cat > "$CLIENT_FILE" <<EOF
