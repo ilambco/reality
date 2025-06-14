@@ -438,6 +438,8 @@ list_dokodemo_nodes() {
 # 修改 generate_config 函数以支持 dokodemo-door
 generate_config() {
     INBOUNDS="[]"
+
+    # VLESS 节点
     for file in $UUID_DIR/*.json; do
         [ -f "$file" ] || continue
         PROTOCOL=$(jq -r .protocol "$file")
@@ -476,13 +478,65 @@ generate_config() {
 EOF
 )
             INBOUNDS=$(echo "$INBOUNDS" | jq ". + [$INBOUND]")
-        elif [[ "$PROTOCOL" == "dokodemo-door" ]]; then
-            PORT=$(jq -r .port "$file")
-            DEST_IP=$(jq -r .settings.address "$file")
-            DEST_PORT=$(jq -r .settings.port "$file")
-            NETWORK_TYPE=$(jq -r .settings.network "$file")
+        fi
+    done
 
-            DOKO_INBOUND=$(cat <<EOF
+    # Shadowsocks 节点
+    for file in $SS_DIR/ss_*.json; do
+        [ -f "$file" ] || continue
+        PORT=$(jq -r .port "$file")
+        PASSWORD=$(jq -r .password "$file")
+        METHOD=$(jq -r .method "$file")
+        if [[ "$PASSWORD" == "null" || "$METHOD" == "null" ]]; then
+            echo "警告: 跳过无效的SS配置文件: $file"
+            continue
+        fi
+        SS_INBOUND=$(cat <<EOF
+{
+    "port": $PORT,
+    "protocol": "shadowsocks",
+    "settings": {
+        "method": "$METHOD",
+        "password": "$PASSWORD",
+        "network": "tcp,udp",
+        "ivCheck": false
+    },
+    "streamSettings": {
+        "network": "tcp",
+        "security": "none",
+        "tcpSettings": {
+            "acceptProxyProtocol": false,
+            "header": {
+                "type": "none"
+            }
+        }
+    },
+    "sniffing": {
+        "enabled": false,
+        "destOverride": [
+            "http",
+            "tls",
+            "quic",
+            "fakedns"
+        ],
+        "metadataOnly": false,
+        "routeOnly": false
+    }
+}
+EOF
+)
+        INBOUNDS=$(echo "$INBOUNDS" | jq ". + [$SS_INBOUND]")
+    done
+
+    # dokodemo-door 节点
+    for file in $UUID_DIR/dokodemo_*.json; do
+        [ -f "$file" ] || continue
+        PORT=$(jq -r .port "$file")
+        DEST_IP=$(jq -r .settings.address "$file")
+        DEST_PORT=$(jq -r .settings.port "$file")
+        NETWORK_TYPE=$(jq -r .settings.network "$file")
+
+        DOKO_INBOUND=$(cat <<EOF
 {
   "port": $PORT,
   "protocol": "dokodemo-door",
@@ -494,10 +548,10 @@ EOF
 }
 EOF
 )
-            INBOUNDS=$(echo "$INBOUNDS" | jq ". + [$DOKO_INBOUND]")
-        fi
+        INBOUNDS=$(echo "$INBOUNDS" | jq ". + [$DOKO_INBOUND]")
     done
 
+    # 写入配置文件
     echo "$INBOUNDS" | jq . >/dev/null 2>&1 || { echo "生成的 JSON 配置无效"; exit 1; }
     cat > $XRAY_CONFIG_PATH <<EOF
 {
