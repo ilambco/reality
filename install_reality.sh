@@ -145,6 +145,7 @@ add_node() {
     CLIENT_FILE="$UUID_DIR/${UUID}_${VLESS_PORT}.json"
     cat > "$CLIENT_FILE" <<EOF
 {
+  "protocol": "vless",
   "uuid": "$UUID",
   "port": $VLESS_PORT,
   "domain": "$DOMAIN",
