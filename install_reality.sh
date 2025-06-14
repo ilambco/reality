@@ -440,7 +440,7 @@ list_port_forward() {
 # 删除脚本本体和快捷方式
 delete_script() {
     echo "即将删除脚本和快捷指令..."
-    rm -f /root/install_reality.sh
+    rm -f "$(realpath $0)"
     rm -f /usr/local/bin/lamb
     echo "脚本和 lamb 快捷方式已删除"
     exit
@@ -448,7 +448,7 @@ delete_script() {
 
 # 主菜单
 show_menu() {
-    echo "================ Reality 管理菜单V1.0.2 ========"
+    echo "================ Reality 管理菜单V1.0.3 ========"
     echo " 1.   添加VLESS+reality节点"
     echo " 2.   添加Shadowsocks节点"
     echo " 3.   删除节点"
