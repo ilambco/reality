@@ -373,68 +373,142 @@ EOF
 EOF
 }
 
-# 端口转发规则文件
-PORT_FORWARD_FILE="/usr/local/etc/xray/port_forward_rules.txt"
+# 添加 dokodemo-door 节点
+add_dokodemo_node() {
+    read -p "请输入中转机监听端口（例如 12345）: " DOKO_PORT
+    read -p "请输入落地机 IP 地址: " DEST_IP
+    read -p "请输入落地机服务端口（例如 443）: " DEST_PORT
+    read -p "请输入网络类型（tcp 或 udp，默认 tcp）: " NETWORK_TYPE
+    NETWORK_TYPE=${NETWORK_TYPE:-tcp}
 
-# 添加端口转发规则
-add_port_forward() {
-    read -p "请输入目标 IP 或域名: " TARGET_IP
-    [ -z "$TARGET_IP" ] && echo "目标 IP 不能为空" && return
+    CLIENT_FILE="$UUID_DIR/dokodemo_${DOKO_PORT}.json"
+    cat > "$CLIENT_FILE" <<EOF
+{
+  "port": $DOKO_PORT,
+  "protocol": "dokodemo-door",
+  "settings": {
+    "address": "$DEST_IP",
+    "port": $DEST_PORT,
+    "network": "$NETWORK_TYPE"
+  }
+}
+EOF
 
-    read -p "请输入目标端口: " TARGET_PORT
-    [[ ! "$TARGET_PORT" =~ ^[0-9]+$ ]] && echo "目标端口无效" && return
+    echo "dokodemo-door 节点已添加"
+    echo "监听端口: $DOKO_PORT"
+    echo "目标地址: $DEST_IP:$DEST_PORT"
+    echo "网络类型: $NETWORK_TYPE"
 
-    read -p "请输入本地转发端口（默认与目标端口相同）: " LOCAL_PORT
-    LOCAL_PORT=${LOCAL_PORT:-$TARGET_PORT}
-
-    grep -q "^$LOCAL_PORT $TARGET_IP $TARGET_PORT$" "$PORT_FORWARD_FILE" 2>/dev/null
-    if [[ $? -eq 0 ]]; then
-        echo "该转发规则已存在"
-        return
-    fi
-
-    iptables -t nat -A PREROUTING -p tcp --dport "$LOCAL_PORT" -j DNAT --to-destination "$TARGET_IP:$TARGET_PORT"
-    iptables -t nat -A POSTROUTING -j MASQUERADE
-    echo "$LOCAL_PORT $TARGET_IP $TARGET_PORT" >> "$PORT_FORWARD_FILE"
-    netfilter-persistent save
-    echo "端口转发已添加: 本地 $LOCAL_PORT -> $TARGET_IP:$TARGET_PORT"
+    generate_config
+    systemctl restart $XRAY_SERVICE || { echo "重启 Xray 服务失败"; exit 1; }
 }
 
-# 删除端口转发规则
-remove_port_forward() {
-    read -p "请输入目标 IP 或域名: " TARGET_IP
-    [ -z "$TARGET_IP" ] && echo "目标 IP 不能为空" && return
-
-    read -p "请输入目标端口: " TARGET_PORT
-    [[ ! "$TARGET_PORT" =~ ^[0-9]+$ ]] && echo "目标端口无效" && return
-
-    MATCH_LINE=$(grep " $TARGET_IP $TARGET_PORT$" "$PORT_FORWARD_FILE" 2>/dev/null)
-    if [[ -z "$MATCH_LINE" ]]; then
-        echo "未找到该端口转发规则"
-        return
+# 删除 dokodemo-door 节点
+remove_dokodemo_node() {
+    echo "现有 dokodemo-door 节点："
+    ls $UUID_DIR | grep dokodemo_
+    read -p "请输入要删除的监听端口: " DEL_PORT
+    FILE_TO_DELETE="$UUID_DIR/dokodemo_${DEL_PORT}.json"
+    if [[ -f "$FILE_TO_DELETE" ]]; then
+        rm -f "$FILE_TO_DELETE"
+        echo "已删除 dokodemo-door 节点，监听端口: $DEL_PORT"
+        generate_config
+        systemctl restart $XRAY_SERVICE || { echo "重启 Xray 服务失败"; exit 1; }
+    else
+        echo "未找到对应监听端口的 dokodemo-door 节点"
     fi
-
-    LOCAL_PORT=$(echo "$MATCH_LINE" | awk '{print $1}')
-    iptables -t nat -D PREROUTING -p tcp --dport "$LOCAL_PORT" -j DNAT --to-destination "$TARGET_IP:$TARGET_PORT"
-    iptables -t nat -D POSTROUTING -j MASQUERADE
-    sed -i "\|^$LOCAL_PORT $TARGET_IP $TARGET_PORT$|d" "$PORT_FORWARD_FILE"
-    netfilter-persistent save
-    echo "已删除转发: 本地 $LOCAL_PORT -> $TARGET_IP:$TARGET_PORT"
 }
 
-# 查看所有端口转发规则
-list_port_forward() {
-    echo "当前端口转发规则:"
-    if [[ ! -s "$PORT_FORWARD_FILE" ]]; then
-        echo "暂无端口转发配置"
-        return
-    fi
-    while read -r line; do
-        LOCAL_PORT=$(echo "$line" | awk '{print $1}')
-        TARGET_IP=$(echo "$line" | awk '{print $2}')
-        TARGET_PORT=$(echo "$line" | awk '{print $3}')
-        echo "本地端口: $LOCAL_PORT -> $TARGET_IP:$TARGET_PORT"
-    done < "$PORT_FORWARD_FILE"
+# 查看所有 dokodemo-door 节点
+list_dokodemo_nodes() {
+    echo "【dokodemo-door 节点列表】"
+    for file in $UUID_DIR/dokodemo_*.json; do
+        [ -e "$file" ] || continue
+        PORT=$(jq -r .port "$file")
+        DEST_IP=$(jq -r .settings.address "$file")
+        DEST_PORT=$(jq -r .settings.port "$file")
+        NETWORK_TYPE=$(jq -r .settings.network "$file")
+        echo "---"
+        echo "监听端口: $PORT"
+        echo "目标地址: $DEST_IP:$DEST_PORT"
+        echo "网络类型: $NETWORK_TYPE"
+    done
+}
+
+# 修改 generate_config 函数以支持 dokodemo-door
+generate_config() {
+    INBOUNDS="[]"
+    for file in $UUID_DIR/*.json; do
+        [ -f "$file" ] || continue
+        PROTOCOL=$(jq -r .protocol "$file")
+        if [[ "$PROTOCOL" == "vless" ]]; then
+            UUID=$(jq -r .uuid "$file")
+            PORT=$(jq -r .port "$file")
+            SERVER_NAME=$(jq -r .server_name "$file")
+            PRIVKEY=$(jq -r .private_key "$file")
+            SHORT_ID=$(jq -r .short_id "$file")
+            PUBKEY=$(jq -r .public_key "$file")
+            SHORT_IDS="[\"$SHORT_ID\"]"
+            CLIENT="[{\"id\": \"$UUID\", \"flow\": \"xtls-rprx-vision\"}]"
+
+            INBOUND=$(cat <<EOF
+{
+  "port": $PORT,
+  "protocol": "vless",
+  "settings": {
+    "clients": $CLIENT,
+    "decryption": "none",
+    "fallbacks": []
+  },
+  "streamSettings": {
+    "network": "tcp",
+    "security": "reality",
+    "realitySettings": {
+      "show": false,
+      "dest": "$SERVER_NAME:443",
+      "xver": 0,
+      "serverNames": ["$SERVER_NAME"],
+      "privateKey": "$PRIVKEY",
+      "shortIds": $SHORT_IDS
+    }
+  }
+}
+EOF
+)
+            INBOUNDS=$(echo "$INBOUNDS" | jq ". + [$INBOUND]")
+        elif [[ "$PROTOCOL" == "dokodemo-door" ]]; then
+            PORT=$(jq -r .port "$file")
+            DEST_IP=$(jq -r .settings.address "$file")
+            DEST_PORT=$(jq -r .settings.port "$file")
+            NETWORK_TYPE=$(jq -r .settings.network "$file")
+
+            DOKO_INBOUND=$(cat <<EOF
+{
+  "port": $PORT,
+  "protocol": "dokodemo-door",
+  "settings": {
+    "address": "$DEST_IP",
+    "port": $DEST_PORT,
+    "network": "$NETWORK_TYPE"
+  }
+}
+EOF
+)
+            INBOUNDS=$(echo "$INBOUNDS" | jq ". + [$DOKO_INBOUND]")
+        fi
+    done
+
+    echo "$INBOUNDS" | jq . >/dev/null 2>&1 || { echo "生成的 JSON 配置无效"; exit 1; }
+    cat > $XRAY_CONFIG_PATH <<EOF
+{
+  "inbounds": $INBOUNDS,
+  "outbounds": [
+    {
+      "protocol": "freedom"
+    }
+  ]
+}
+EOF
 }
 
 # 删除脚本本体和快捷方式
@@ -448,15 +522,15 @@ delete_script() {
 
 # 主菜单
 show_menu() {
-    echo "================ Reality 管理菜单V1.0.3 ========"
+    echo "================ Reality 管理菜单V1.0.2 ========"
     echo " 1.   添加VLESS+reality节点"
     echo " 2.   添加Shadowsocks节点"
     echo " 3.   删除节点"
     echo " 4.   查看节点"
-    echo " --------------- 端口转发 ---------------"
-    echo " 5.   添加端口转发"
-    echo " 6.   删除端口转发"
-    echo " 7.   查看端口转发"
+    echo " --------------- dokodemo-door 管理 ---------------"
+    echo " 5.   添加 dokodemo-door 节点"
+    echo " 6.   删除 dokodemo-door 节点"
+    echo " 7.   查看 dokodemo-door 节点"
     echo " --------------- Xray 管理 ---------------"
     echo " 8.   安装/启用"
     echo " 9.   停止"
@@ -502,9 +576,9 @@ while true; do
         2) add_ss_node;;
         3) remove_node;;
         4) view_node;;
-        5) add_port_forward;;
-        6) remove_port_forward;;
-        7) list_port_forward;;
+        5) add_dokodemo_node;;
+        6) remove_dokodemo_node;;
+        7) list_dokodemo_nodes;;
         8)
             if [[ ! -f $XRAY_BIN ]]; then
                 install_xray
