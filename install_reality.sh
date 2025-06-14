@@ -164,6 +164,36 @@ EOF
     echo "vless://$UUID@$DOMAIN:$VLESS_PORT?type=tcp&security=reality&pbk=$PUBKEY&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#Reality-$DOMAIN"
 }
 
+# 添加 Shadowsocks 节点
+add_ss_node() {
+    mkdir -p "$SS_DIR"
+    read -p "请输入端口（默认10000）: " SS_PORT
+    SS_PORT=${SS_PORT:-10000}
+    METHOD="2022-blake3-aes-256-gcm"
+    PASSWORD=$(head -c 32 /dev/urandom | base64 | tr -d '\n')
+    CLIENT_FILE="$SS_DIR/ss_${SS_PORT}.json"
+    cat > "$CLIENT_FILE" <<EOF
+{
+    "port": $SS_PORT,
+    "password": "$PASSWORD",
+    "method": "$METHOD"
+}
+EOF
+
+    IP=$(get_ip)
+    USERINFO=$(echo -n "${METHOD}:${PASSWORD}" | base64 -w 0)
+    SS_URL="ss://${USERINFO}@${IP}:${SS_PORT}#SS-${SS_PORT}"
+
+    echo "Shadowsocks节点已添加"
+    echo "端口: $SS_PORT"
+    echo "密码: $PASSWORD"
+    echo "加密方式: $METHOD"
+    echo "节点链接: $SS_URL"
+
+    generate_config
+    systemctl restart $XRAY_SERVICE
+}
+
 # 删除节点
 remove_node() {
     echo "请选择要删除的节点类型:"
