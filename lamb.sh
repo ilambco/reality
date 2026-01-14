@@ -1,8 +1,9 @@
 #!/bin/bash
 
 # ==========================================
-# Reality & Xray 管理脚本 (Lamb v4 最终修正)
-# 修复：x25519 -i 参数传递方式错误
+# Reality & Xray 管理脚本 (Lamb v5 终极版)
+# 修复：自动识别并覆盖非官方/魔改版 Xray
+# 修复：选项 2 无效的问题
 # ==========================================
 
 # --- 核心配置变量 ---
@@ -32,6 +33,15 @@ install_dependencies() {
     fi
 }
 
+# 强制重装官方内核
+force_reinstall_core() {
+    echo -e "${RED}检测到 Xray 内核版本异常/损坏，正在强制重装官方版本...${PLAIN}"
+    systemctl stop xray
+    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install --force
+    systemctl restart xray
+    echo -e "${GREEN}内核修复完成！${PLAIN}"
+}
+
 install_xray_core() {
     if [ ! -f "$XRAY_BIN" ]; then
         echo -e "${YELLOW}安装 Xray...${PLAIN}"
@@ -43,33 +53,35 @@ install_xray_core() {
     fi
 }
 
-# --- 核心修复：密钥生成函数 (v4) ---
+# --- 核心修复：智能密钥生成函数 (v5) ---
 generate_keys() {
-    # 1. 生成原始私钥
-    # 你的版本输出格式为 "PrivateKey: xxxxx" (无空格)
+    # 尝试生成
     RAW_OUT=$($XRAY_BIN x25519)
     
-    # 提取私钥：忽略大小写匹配 Private，用冒号分割取第2段，删除所有空白字符
-    PRIVATE_KEY=$(echo "$RAW_OUT" | grep -i "Private" | cut -d: -f2 | tr -d '[:space:]')
+    # 宽松匹配私钥 (兼容 PrivateKey, Private Key, private key 等各种写法)
+    # sed 移除所有 "Private Key:" 前缀和空格
+    PRIVATE_KEY=$(echo "$RAW_OUT" | grep -i "Private" | sed 's/.*[Pp]rivate.*[Kk]ey.*:[\t ]*//g' | tr -d '[:space:]')
+    
+    # 尝试提取公钥
+    PUBLIC_KEY=$(echo "$RAW_OUT" | grep -i "Public" | sed 's/.*[Pp]ublic.*[Kk]ey.*:[\t ]*//g' | tr -d '[:space:]')
 
-    if [[ -z "$PRIVATE_KEY" ]]; then
-        echo -e "${RED}错误：无法获取私钥。Xray 输出为: $RAW_OUT${PLAIN}"
-        return 1
+    # 【关键逻辑】如果获取不到公钥，或者输出包含诡异字段(如 Password)，说明内核不对
+    if [[ -z "$PUBLIC_KEY" ]] || echo "$RAW_OUT" | grep -q "Password"; then
+        echo -e "${YELLOW}警告: 当前 Xray 内核无法生成公钥，可能是非官方修改版。${PLAIN}"
+        echo -e "异常输出: $RAW_OUT"
+        
+        # 触发强制重装
+        force_reinstall_core
+        
+        # 重试生成
+        RAW_OUT=$($XRAY_BIN x25519)
+        PRIVATE_KEY=$(echo "$RAW_OUT" | grep -i "Private" | awk -F': ' '{print $2}' | tr -d '[:space:]')
+        PUBLIC_KEY=$(echo "$RAW_OUT" | grep -i "Public" | awk -F': ' '{print $2}' | tr -d '[:space:]')
     fi
 
-    # 2. 强制反推公钥 (修复点：使用参数传递而非管道)
-    # 语法：xray x25519 -i "私钥"
-    CALC_OUT=$($XRAY_BIN x25519 -i "$PRIVATE_KEY")
-    
-    # 从反推结果中提取 Public Key
-    # 反推结果通常包含 "Public key: yyyyy"
-    PUBLIC_KEY=$(echo "$CALC_OUT" | grep -i "Public" | cut -d: -f2 | tr -d '[:space:]')
-
-    # 3. 最终检查
-    if [[ -z "$PUBLIC_KEY" ]]; then
-        echo -e "${RED}严重错误：无法反推公钥。${PLAIN}"
-        echo -e "私钥: $PRIVATE_KEY"
-        echo -e "反推输出: $CALC_OUT"
+    # 最终检查
+    if [[ -z "$PRIVATE_KEY" ]] || [[ -z "$PUBLIC_KEY" ]]; then
+        echo -e "${RED}严重错误：内核重装后仍无法生成密钥。请检查网络连接或系统环境。${PLAIN}"
         return 1
     fi
     
@@ -81,7 +93,6 @@ generate_keys() {
 add_reality() {
     echo -e "${YELLOW}正在计算密钥与生成配置...${PLAIN}"
     
-    # 调用修复后的密钥生成
     if ! generate_keys; then return; fi
     
     UUID=$($XRAY_BIN uuid)
@@ -138,6 +149,14 @@ add_reality() {
     echo -e " PBK : ${PUBLIC_KEY}"
     echo -e "--------------------------------------------------"
     echo -e " 链接: ${GREEN}${LINK}${PLAIN}"
+    echo -e "--------------------------------------------------"
+}
+
+# 修复选项 2
+add_shadowsocks() {
+    echo -e "--------------------------------------------------"
+    echo -e "${YELLOW}Shadowsocks 功能开发中，将在下个版本上线。${PLAIN}"
+    echo -e "建议优先使用 VLESS + Reality，更稳定且抗封锁。"
     echo -e "--------------------------------------------------"
 }
 
@@ -201,7 +220,7 @@ show_menu() {
     MYIP=$(curl -s4m8 ip.sb)
 
     echo -e "=================================================="
-    echo -e "          Reality & Xray 管理脚本 (Lamb v4)       "
+    echo -e "          Reality & Xray 管理脚本 (Lamb v5)       "
     echo -e "=================================================="
     echo -e " 系统状态:"
     echo -e " - Xray 服务: ${X_STATUS}    - BBR 加速: ${B_STATUS}"
@@ -209,7 +228,7 @@ show_menu() {
     echo -e "--------------------------------------------------"
     echo -e " [ 节点管理 ]"
     echo -e " 1.  添加 VLESS + Reality 节点"
-    echo -e " 2.  添加 Shadowsocks 节点 (未启用)"
+    echo -e " 2.  添加 Shadowsocks 节点 (预告)"
     echo -e " 3.  删除 指定节点"
     echo -e " 4.  查看 所有节点 (链接/二维码)"
     echo -e ""
@@ -235,6 +254,7 @@ while true; do
     show_menu
     case "$CHOICE" in
         1) add_reality ;;
+        2) add_shadowsocks ;;
         3) del_node ;;
         4) view_nodes ;;
         8) enable_bbr ;;
