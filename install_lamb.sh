@@ -1,198 +1,310 @@
 #!/bin/bash
 
-# ===================================================
-# Reality & Xray 管理脚本 (Lamb) - V1.1.4
-# ===================================================
+# ==========================================
+# Reality & Xray 管理脚本 (Lamb 修复版)
+# 修复：节点无输出、服务自启、BBR 冲突问题
+# 依赖：curl, jq, openssl, systemd
+# ==========================================
 
-# 颜色定义
+# --- 全局变量 ---
+XRAY_BIN_PATH="/usr/local/bin/xray"
+XRAY_CONFIG_DIR="/usr/local/etc/xray"
+XRAY_CONFIG_FILE="${XRAY_CONFIG_DIR}/config.json"
+SYSTEMD_FILE="/etc/systemd/system/xray.service"
+
+# 颜色
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-PURPLE='\033[0;35m'
-CYAN='\033[0;36m'
-NC='\033[0m'
+PLAIN='\033[0m'
 
-# 全局变量
-XRAY_CONFIG_PATH="/usr/local/etc/xray/config.json"
-XRAY_BIN="/usr/local/bin/xray"
-XRAY_SERVICE="xray.service"
-UUID_DIR="/usr/local/etc/xray/clients"
-SS_DIR="/usr/local/etc/xray/ss_clients"
-TUNNEL_DIR="/usr/local/etc/xray/tunnels"
+# --- 基础函数 ---
 
-# 1. 环境初始化
-pre_flight_check() {
-    [[ $EUID -ne 0 ]] && echo -e "${RED}错误: 必须以 root 运行${NC}" && exit 1
-
-    # 安装依赖
-    DEPS=(curl jq openssl unzip qrencode dnsutils)
-    if ! command -v curl &> /dev/null; then apt-get update && apt-get install -y curl; fi
-    MISSING=()
-    for pkg in "${DEPS[@]}"; do
-        if ! command -v $pkg &> /dev/null; then MISSING+=("$pkg"); fi
-    done
-    [[ ${#MISSING[@]} -gt 0 ]] && apt-get update && apt-get install -y "${MISSING[@]}"
-
-    mkdir -p "$UUID_DIR" "$SS_DIR" "$TUNNEL_DIR" "/usr/local/etc/xray"
-
-    # 快捷指令
-    cp "$(realpath $0)" /usr/local/bin/lamb 2>/dev/null
-    chmod +x /usr/local/bin/lamb 2>/dev/null
-}
-
-# 2. 辅助工具
-get_ip() {
-    local ip=$(curl -s --max-time 3 ipv4.ip.sb || curl -s --max-time 3 ifconfig.me)
-    [[ -z "$ip" ]] && ip=$(hostname -I | awk '{print $1}')
-    echo "$ip"
-}
-
-get_xray_status() {
-    systemctl is-active --quiet $XRAY_SERVICE && echo -e "${GREEN}运行中${NC}" || echo -e "${RED}停止${NC}"
-}
-
-get_bbr_status() {
-    sysctl net.ipv4.tcp_congestion_control | grep -q "bbr" && echo -e "${GREEN}已开启${NC}" || echo -e "${RED}未开启${NC}"
-}
-
-# 3. 核心功能
-add_node() {
-    read -p "请输入节点备注: " REMARK
-    REMARK=${REMARK:-"Reality-Node"}
-    IP=$(get_ip)
-    read -p "请输入端口 (默认 443): " VLESS_PORT
-    VLESS_PORT=${VLESS_PORT:-443}
-    read -p "请输入伪装域名 (默认 itunes.apple.com): " SERVER_NAME
-    SERVER_NAME=${SERVER_NAME:-itunes.apple.com}
-
-    # 核心修复：兼容多种 Xray 输出格式
-    echo -e "${CYAN}正在生成密钥对...${NC}"
-    KEYS=$($XRAY_BIN x25519 2>/dev/null)
-    
-    # 尝试匹配 PrivateKey: 或 Private key:
-    PRIVKEY=$(echo "$KEYS" | grep -i "Private" | awk -F ': ' '{print $2}' | tr -d '[:space:]')
-    # 尝试匹配 Password: 或 Public key:
-    PUBKEY=$(echo "$KEYS" | grep -E -i "Public|Password" | awk -F ': ' '{print $2}' | tr -d '[:space:]')
-    
-    if [[ -z "$PUBKEY" || -z "$PRIVKEY" ]]; then
-        echo -e "${RED}错误: 抓取密钥失败！${NC}"
-        echo -e "Xray 输出内容为:\n$KEYS"
-        read -n 1 -s -r -p "按任意键返回..."
-        return 1
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+        echo -e "${RED}错误: 请使用 sudo 或 root 权限运行此脚本！${PLAIN}"
+        exit 1
     fi
+}
 
-    UUID=$($XRAY_BIN uuid)
+install_dependencies() {
+    echo -e "${YELLOW}正在检查并安装必要依赖 (jq, curl, openssl)...${PLAIN}"
+    if [ -f /etc/debian_version ]; then
+        apt-get update -y >/dev/null 2>&1
+        apt-get install -y jq curl openssl wget >/dev/null 2>&1
+    elif [ -f /etc/redhat-release ]; then
+        yum install -y epel-release >/dev/null 2>&1
+        yum install -y jq curl openssl wget >/dev/null 2>&1
+    fi
+    
+    if ! command -v jq &> /dev/null; then
+        echo -e "${RED}错误: jq 安装失败，脚本无法处理 JSON。请手动安装 jq。${PLAIN}"
+        exit 1
+    fi
+}
+
+# --- Xray 核心安装与配置 ---
+
+install_xray() {
+    if [ -f "${XRAY_BIN_PATH}" ]; then
+        echo -e "${GREEN}Xray 已安装。${PLAIN}"
+        return
+    fi
+    
+    echo -e "${YELLOW}开始安装 Xray 最新版本...${PLAIN}"
+    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+    
+    # 确保配置目录存在
+    mkdir -p ${XRAY_CONFIG_DIR}
+    
+    # 初始化空配置 (如果不存在)
+    if [ ! -f "${XRAY_CONFIG_FILE}" ] || [ ! -s "${XRAY_CONFIG_FILE}" ]; then
+        cat > ${XRAY_CONFIG_FILE} <<EOF
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    },
+    {
+      "protocol": "blackhole",
+      "tag": "blocked"
+    }
+  ]
+}
+EOF
+    fi
+    
+    # 修复 Systemd 文件以确保自启
+    cat > ${SYSTEMD_FILE} <<EOF
+[Unit]
+Description=Xray Service
+Documentation=https://github.com/xtls
+After=network.target nss-lookup.target
+
+[Service]
+User=root
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ExecStart=${XRAY_BIN_PATH} run -c ${XRAY_CONFIG_FILE}
+Restart=on-failure
+RestartPreventExitStatus=23
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    
+    systemctl daemon-reload
+    systemctl enable xray
+    echo -e "${GREEN}Xray 安装完成并已设置开机自启。${PLAIN}"
+}
+
+# --- 功能逻辑 ---
+
+enable_bbr() {
+    echo -e "${YELLOW}正在配置 BBR...${PLAIN}"
+    # 简单的 BBR 开启逻辑，不应干扰 Xray
+    if ! grep -q "net.core.default_qdisc=fq" /etc/sysctl.conf; then
+        echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    fi
+    if ! grep -q "net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf; then
+        echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    fi
+    sysctl -p >/dev/null 2>&1
+    echo -e "${GREEN}BBR 已开启 (无需重启 Xray)。${PLAIN}"
+}
+
+check_status() {
+    if systemctl is-active --quiet xray; then
+        XRAY_STATUS="${GREEN}运行中${PLAIN}"
+    else
+        XRAY_STATUS="${RED}已停止${PLAIN}"
+    fi
+    
+    BBR_STATUS=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
+    if [[ "$BBR_STATUS" == "bbr" ]]; then
+        BBR_COLOR="${GREEN}已开启${PLAIN}"
+    else
+        BBR_COLOR="${RED}未开启${PLAIN}"
+    fi
+    
+    IP=$(curl -s4m8 ip.sb)
+}
+
+# --- 节点管理 (重点修复部分) ---
+
+add_reality_node() {
+    echo -e "${YELLOW}正在生成 Reality 节点配置...${PLAIN}"
+    
+    # 生成必要参数
+    UUID=$(${XRAY_BIN_PATH} uuid)
+    KEYS=$(${XRAY_BIN_PATH} x25519)
+    PRIVATE_KEY=$(echo "$KEYS" | awk '/Private/{print $3}')
+    PUBLIC_KEY=$(echo "$KEYS" | awk '/Public/{print $3}')
     SHORT_ID=$(openssl rand -hex 4)
-
-    CLIENT_FILE="$UUID_DIR/${UUID}.json"
-    cat > "$CLIENT_FILE" <<EOF
-{
-  "remark": "$REMARK", "protocol": "vless", "uuid": "$UUID", "port": $VLESS_PORT,
-  "domain": "$IP", "server_name": "$SERVER_NAME", "private_key": "$PRIVKEY",
-  "public_key": "$PUBKEY", "short_id": "$SHORT_ID"
-}
-EOF
-    generate_config
-    systemctl restart $XRAY_SERVICE
+    PORT=$(shuf -i 10000-65000 -n 1) # 随机端口避免冲突
     
-    echo -e "${GREEN}节点已成功添加并启动！${NC}"
-    URL="vless://$UUID@$IP:$VLESS_PORT?type=tcp&security=reality&pbk=$PUBKEY&fp=chrome&sni=$SERVER_NAME&sid=$SHORT_ID&spx=%2F&flow=xtls-rprx-vision#$REMARK"
-    echo -e "\n${YELLOW}您的分享链接:${NC}\n$URL"
-    qrencode -t ansiutf8 "$URL"
-    read -n 1 -s -r -p "按任意键返回主菜单..."
-}
+    read -p "请输入目标网站 (默认: www.microsoft.com): " DEST_URL
+    [ -z "$DEST_URL" ] && DEST_URL="www.microsoft.com"
 
-generate_config() {
-    local INBOUNDS="[]"
-    # VLESS 遍历
-    for f in "$UUID_DIR"/*.json; do
-        [[ ! -f "$f" ]] && continue
-        PT=$(jq -r .port "$f"); UID=$(jq -r .uuid "$f"); SNI=$(jq -r .server_name "$f"); PRV=$(jq -r .private_key "$f"); SID=$(jq -r .short_id "$f")
-        IB=$(cat <<EOF
-{
-  "port": $PT, "protocol": "vless",
-  "settings": { "clients": [{"id": "$UID", "flow": "xtls-rprx-vision"}], "decryption": "none" },
-  "streamSettings": { "network": "tcp", "security": "reality",
-    "realitySettings": { "show": false, "dest": "$SNI:443", "xver": 0, "serverNames": ["$SNI"], "privateKey": "$PRV", "shortIds": ["$SID"] }
-  }
-}
-EOF
-)
-        INBOUNDS=$(echo "$INBOUNDS" | jq ". + [$IB]")
-    done
-    # SS 遍历
-    for f in "$SS_DIR"/*.json; do
-        [[ ! -f "$f" ]] && continue
-        PT=$(jq -r .port "$f"); PW=$(jq -r .password "$f"); MT=$(jq -r .method "$f")
-        IB=$(cat <<EOF
-{ "port": $PT, "protocol": "shadowsocks", "settings": { "method": "$MT", "password": "$PW", "network": "tcp,udp" } }
-EOF
-)
-        INBOUNDS=$(echo "$INBOUNDS" | jq ". + [$IB]")
-    done
+    # 使用 jq 构造 JSON 对象并插入 (解决 sed 写入失败的问题)
+    # 这是一个标准的 VLESS-Reality 入站配置
+    jq --arg uuid "$UUID" \
+       --arg port "$PORT" \
+       --arg pk "$PRIVATE_KEY" \
+       --arg sid "$SHORT_ID" \
+       --arg dest "$DEST_URL:443" \
+       --arg server "$DEST_URL" \
+       '.inbounds += [{
+         "port": ($port | tonumber),
+         "protocol": "vless",
+         "settings": {
+           "clients": [{"id": $uuid, "flow": "xtls-rprx-vision"}],
+           "decryption": "none"
+         },
+         "streamSettings": {
+           "network": "tcp",
+           "security": "reality",
+           "realitySettings": {
+             "show": false,
+             "dest": $dest,
+             "xver": 0,
+             "serverNames": [$server],
+             "privateKey": $pk,
+             "shortIds": [$sid]
+           }
+         },
+         "tag": ("reality_" + $port)
+       }]' ${XRAY_CONFIG_FILE} > ${XRAY_CONFIG_FILE}.tmp && mv ${XRAY_CONFIG_FILE}.tmp ${XRAY_CONFIG_FILE}
+
+    echo -e "${GREEN}节点添加成功！正在重启 Xray...${PLAIN}"
+    systemctl restart xray
+    sleep 1
     
-    # 写入配置
-    cat > $XRAY_CONFIG_PATH <<EOF
-{ "inbounds": $INBOUNDS, "outbounds": [{"protocol": "freedom"}] }
-EOF
+    # 立即输出链接
+    IP=$(curl -s4m8 ip.sb)
+    SHARE_LINK="vless://${UUID}@${IP}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DEST_URL}&sid=${SHORT_ID}&spx=%2F#Reality_${PORT}"
+    
+    echo -e "--------------------------------------------------"
+    echo -e " VLESS + Reality 节点详情:"
+    echo -e " IP: ${IP}"
+    echo -e " Port: ${PORT}"
+    echo -e " UUID: ${UUID}"
+    echo -e " SNI: ${DEST_URL}"
+    echo -e " Public Key: ${PUBLIC_KEY}"
+    echo -e " Short ID: ${SHORT_ID}"
+    echo -e "--------------------------------------------------"
+    echo -e " 复制链接: ${GREEN}${SHARE_LINK}${PLAIN}"
+    echo -e "--------------------------------------------------"
 }
 
-# 4. 主菜单
-show_menu() {
-    clear
-    echo -e "${CYAN}==================================================${NC}"
-    echo -e "${BLUE}          Reality & Xray 管理脚本 (Lamb)          ${NC}"
-    echo -e "${CYAN}==================================================${NC}"
-    echo -e "  系统状态:"
-    echo -e "  - Xray 服务: $(get_xray_status)    - BBR 加速: $(get_bbr_status)"
-    echo -e "  - 本机 IP  : ${YELLOW}$(get_ip)${NC}"
-    echo -e "${CYAN}--------------------------------------------------${NC}"
-    echo -e "  ${PURPLE}[ 节点管理 ]${NC}"
-    echo -e "  1.  ${GREEN}添加${NC} VLESS + Reality 节点"
-    echo -e "  2.  ${GREEN}添加${NC} Shadowsocks 节点"
-    echo -e "  3.  ${RED}删除${NC} 指定节点"
-    echo -e "  4.  ${CYAN}查看${NC} 所有节点 (链接/二维码)"
-    echo -e "\n  ${PURPLE}[ 隧道管理 ]${NC}"
-    echo -e "  5.  添加 端口转发 (Tunnel)"
-    echo -e "  6.  查看/删除 隧道列表"
-    echo -e "\n  ${PURPLE}[ 系统工具 ]${NC}"
-    echo -e "  8.  开启/关闭 BBR 加速"
-    echo -e "  9.  查看 Xray 实时日志"
-    echo -e "  10. 服务控制: 重启/启动/停止"
-    echo -e "  11. 彻底卸载 Xray / 删除脚本"
-    echo -e "  0.  退出脚本"
-    echo -e "${CYAN}==================================================${NC}"
-    echo -n " 请选择 [0-11]: "
+view_nodes() {
+    echo -e "${YELLOW}正在读取节点列表...${PLAIN}"
+    # 使用 jq 解析并构建链接
+    # 注意：这里需要重新生成分享链接，为了简化，我们尽量从配置文件反推
+    # 但由于 JSON 不存 Public Key (只有 Private Key)，无法反推完整的 Reality 链接供客户端使用
+    # 所以我们这里只列出端口和基本信息，Reality 的 PrivateKey 无法算出 PublicKey
+    
+    echo -e "目前 Xray 配置文件中的入站列表："
+    echo -e "--------------------------------------------------"
+    jq -r '.inbounds[] | "端口: \(.port), 协议: \(.protocol), Tag: \(.tag)"' ${XRAY_CONFIG_FILE}
+    echo -e "--------------------------------------------------"
+    echo -e "${RED}注意：由于 Reality 机制限制，配置文件中只保存私钥。${PLAIN}"
+    echo -e "${RED}查看完整分享链接建议在添加节点时立即保存，或手动记录公钥。${PLAIN}"
 }
 
-pre_flight_check
-while true; do
-    show_menu
-    read choice
-    case "$choice" in
-        1) add_node ;;
-        2) 
-           read -p "备注: " r; r=${r:-"SS-Node"}; read -p "端口: " p; pw=$(openssl rand -base64 32)
-           cf="$SS_DIR/ss_${p}.json"; echo "{ \"remark\": \"$r\", \"port\": $p, \"password\": \"$pw\", \"method\": \"2022-blake3-aes-256-gcm\" }" > "$cf"
-           generate_config && systemctl restart $XRAY_SERVICE && echo "SS 节点已添加" ;;
-        3) echo -n "输入关键词: "; read k; find "$UUID_DIR" "$SS_DIR" "$TUNNEL_DIR" -name "*$k*" -delete; generate_config; systemctl restart $XRAY_SERVICE; sleep 1 ;;
-        4) 
-           for f in "$UUID_DIR"/*.json; do [[ -e "$f" ]] && { 
-               URL="vless://$(jq -r .uuid "$f")@$(jq -r .domain "$f"):$(jq -r .port "$f")?type=tcp&security=reality&pbk=$(jq -r .public_key "$f")&fp=chrome&sni=$(jq -r .server_name "$f")&sid=$(jq -r .short_id "$f")&spx=%2F&flow=xtls-rprx-vision#$(jq -r .remark "$f")"
-               echo -e "\n${YELLOW}备注: $(jq -r .remark "$f")${NC}\n$URL"; qrencode -t ansiutf8 "$URL"
-           } done
-           read -n 1 -s -r -p "回车继续..." ;;
-        8)
-           if sysctl net.ipv4.tcp_congestion_control | grep -q "bbr"; then
-               sed -i '/net.core/d' /etc/sysctl.conf; sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf; sysctl -p
-           else
-               echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf; echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf; sysctl -p
-           fi ;;
-        9) journalctl -u $XRAY_SERVICE -f -n 100 ;;
-        10) systemctl restart $XRAY_SERVICE ;;
-        11) systemctl stop $XRAY_SERVICE; rm -rf /usr/local/bin/xray /usr/local/etc/xray /usr/local/bin/lamb "$0"; exit ;;
-        0) exit ;;
-        *) echo "无效选项"; sleep 1 ;;
+delete_node() {
+    read -p "请输入要删除的节点端口: " DEL_PORT
+    if [ -z "$DEL_PORT" ]; then echo "取消操作"; return; fi
+    
+    # 使用 jq 删除特定端口的 inbound
+    jq --argjson port "$DEL_PORT" 'del(.inbounds[] | select(.port == $port))' ${XRAY_CONFIG_FILE} > ${XRAY_CONFIG_FILE}.tmp && mv ${XRAY_CONFIG_FILE}.tmp ${XRAY_CONFIG_FILE}
+    
+    echo -e "${GREEN}端口 $DEL_PORT 的节点已删除。重启服务中...${PLAIN}"
+    systemctl restart xray
+}
+
+service_control() {
+    echo -e "1. 启动 Xray"
+    echo -e "2. 停止 Xray"
+    echo -e "3. 重启 Xray"
+    read -p "选择: " ACT
+    case $ACT in
+        1) systemctl start xray; echo "已启动" ;;
+        2) systemctl stop xray; echo "已停止" ;;
+        3) systemctl restart xray; echo "已重启" ;;
+        *) echo "无效选项" ;;
     esac
+}
+
+check_logs() {
+    journalctl -u xray -f -n 50
+}
+
+uninstall_xray() {
+    echo -e "${RED}确定要卸载 Xray 吗? [y/N]${PLAIN}"
+    read -r CONFIRM
+    if [[ "$CONFIRM" != "y" ]]; then return; fi
+    
+    systemctl stop xray
+    systemctl disable xray
+    rm -f ${SYSTEMD_FILE}
+    rm -rf ${XRAY_BIN_PATH}
+    rm -rf ${XRAY_CONFIG_DIR}
+    systemctl daemon-reload
+    echo -e "${GREEN}Xray 已彻底卸载。${PLAIN}"
+}
+
+# --- 菜单循环 ---
+
+main_menu() {
+    clear
+    check_status
+    echo -e "=================================================="
+    echo -e "          Reality & Xray 管理脚本 (Lamb 修复版)    "
+    echo -e "=================================================="
+    echo -e " 系统状态:"
+    echo -e " - Xray 服务: ${XRAY_STATUS}    - BBR 加速: ${BBR_COLOR}"
+    echo -e " - 本机 IP  : ${IP}"
+    echo -e "--------------------------------------------------"
+    echo -e " [ 节点管理 ]"
+    echo -e " 1.  添加 VLESS + Reality 节点 (修复版)"
+    echo -e " 2.  删除 指定节点"
+    echo -e " 3.  查看 所有节点列表"
+    echo -e ""
+    echo -e " [ 系统工具 ]"
+    echo -e " 4.  开启 BBR 加速 (安全模式)"
+    echo -e " 5.  查看 Xray 实时日志"
+    echo -e " 6.  服务控制: 启动/停止/重启"
+    echo -e " 7.  彻底卸载 Xray"
+    echo -e " 0.  退出脚本"
+    echo -e "=================================================="
+    read -p " 请输入选项 [0-7]: " num
+    
+    case "$num" in
+        1) add_reality_node ;;
+        2) delete_node ;;
+        3) view_nodes ;;
+        4) enable_bbr ;;
+        5) check_logs ;;
+        6) service_control ;;
+        7) uninstall_xray ;;
+        0) exit 0 ;;
+        *) echo -e "${RED}无效选项，请重试${PLAIN}" ;;
+    esac
+}
+
+# --- 主程序入口 ---
+check_root
+install_dependencies
+install_xray
+
+while true; do
+    main_menu
+    read -p "回车继续..."
 done
