@@ -1,17 +1,16 @@
 #!/bin/bash
 
 # ==========================================
-# Reality & Xray 管理脚本 (Lamb v6 指定版本版)
-# 特性：强制锁定使用官方稳定版 v25.12.8
+# Reality & Xray 管理脚本 (Lamb v7 手动替换版)
+# 修复：绕过安装脚本，强制手动替换二进制文件
 # ==========================================
 
 # --- 核心配置 ---
-# 指定目标版本 (和 3x-ui 保持一致的稳定版)
-TARGET_VERSION="v25.12.8"
-
 XRAY_BIN="/usr/local/bin/xray"
 XRAY_CONF_DIR="/usr/local/etc/xray"
 XRAY_CONF_FILE="${XRAY_CONF_DIR}/config.json"
+# 使用官方最新版下载链接
+DOWNLOAD_URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
 
 # --- 颜色 ---
 RED='\033[0;31m'
@@ -25,66 +24,103 @@ check_root() {
 }
 
 install_dependencies() {
-    if ! command -v jq &> /dev/null; then
-        echo -e "${YELLOW}安装必要组件 (jq)...${PLAIN}"
-        if [ -f /etc/debian_version ]; then
-            apt-get update -y && apt-get install -y jq curl openssl >/dev/null 2>&1
-        else
-            yum install -y epel-release && yum install -y jq curl openssl >/dev/null 2>&1
-        fi
+    echo -e "${YELLOW}检查并安装依赖 (jq, unzip, curl)...${PLAIN}"
+    if [ -f /etc/debian_version ]; then
+        apt-get update -y >/dev/null 2>&1
+        apt-get install -y jq curl openssl unzip >/dev/null 2>&1
+    else
+        yum install -y epel-release >/dev/null 2>&1
+        yum install -y jq curl openssl unzip >/dev/null 2>&1
     fi
 }
 
-# --- 核心：强制安装指定版本 ---
-check_and_fix_core() {
-    # 1. 检查当前版本
-    CURRENT_VER=""
+# --- 核心：手动暴力替换内核 ---
+manual_install_xray() {
+    echo -e "${YELLOW}正在检测内核状态...${PLAIN}"
+    
+    # 检查当前内核输出是否正常
     if [ -f "$XRAY_BIN" ]; then
-        CURRENT_VER=$($XRAY_BIN version | head -n 1 | awk '{print $2}')
+        TEST_OUT=$($XRAY_BIN x25519)
+        if echo "$TEST_OUT" | grep -q "Password"; then
+            echo -e "${RED}检测到魔改版 Xray (含 Password 字段)，必须强制替换！${PLAIN}"
+            NEED_INSTALL=1
+        elif ! echo "$TEST_OUT" | grep -q "Public"; then
+            echo -e "${RED}检测到内核无法输出公钥，必须强制替换！${PLAIN}"
+            NEED_INSTALL=1
+        else
+            echo -e "${GREEN}当前内核正常。${PLAIN}"
+            NEED_INSTALL=0
+        fi
+    else
+        NEED_INSTALL=1
     fi
 
-    # 2. 如果版本不匹配，或者无法获取版本，则强制重装
-    if [[ "$CURRENT_VER" != "$TARGET_VERSION" ]]; then
-        echo -e "${YELLOW}当前内核 ($CURRENT_VER) 非目标版本，正在强制安装官方 $TARGET_VERSION ...${PLAIN}"
+    if [ "$NEED_INSTALL" -eq 1 ]; then
+        echo -e "${YELLOW}正在执行手动替换 (Nuclear Option)...${PLAIN}"
         
+        # 1. 停止服务
         systemctl stop xray 2>/dev/null
         
-        # 使用官方脚本强制安装指定版本
-        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install --version $TARGET_VERSION --force
+        # 2. 删除旧文件
+        rm -f "$XRAY_BIN"
         
-        if [ $? -ne 0 ]; then
-            echo -e "${RED}安装失败！请检查网络连接。${PLAIN}"
-            exit 1
+        # 3. 创建临时目录
+        mkdir -p /tmp/xray_install
+        
+        # 4. 下载官方 ZIP
+        echo -e "${YELLOW}正在从 GitHub 下载官方内核...${PLAIN}"
+        curl -L -o /tmp/xray.zip "$DOWNLOAD_URL"
+        
+        if [ ! -f /tmp/xray.zip ]; then
+             echo -e "${RED}下载失败，请检查网络连接！${PLAIN}"
+             exit 1
         fi
         
-        echo -e "${GREEN}内核已修正为 $TARGET_VERSION。${PLAIN}"
+        # 5. 解压
+        echo -e "${YELLOW}解压并安装...${PLAIN}"
+        unzip -o /tmp/xray.zip -d /tmp/xray_install >/dev/null 2>&1
+        
+        # 6. 移动文件
+        mv /tmp/xray_install/xray "$XRAY_BIN"
+        chmod +x "$XRAY_BIN"
+        
+        # 7. 清理
+        rm -rf /tmp/xray_install /tmp/xray.zip
+        
+        echo -e "${GREEN}官方内核替换完成！${PLAIN}"
+        
+        # 验证
+        NEW_VER=$($XRAY_BIN version | head -n 1)
+        echo -e "新内核版本: $NEW_VER"
+        
+        # 重启服务
         systemctl restart xray
-    else
-        echo -e "${GREEN}内核版本正确 ($TARGET_VERSION)。${PLAIN}"
     fi
 
-    # 3. 确保配置文件目录存在
+    # 确保配置目录存在
     mkdir -p "$XRAY_CONF_DIR"
     if [ ! -f "$XRAY_CONF_FILE" ] || [ ! -s "$XRAY_CONF_FILE" ]; then
         echo '{"log":{"loglevel":"warning"},"inbounds":[],"outbounds":[{"protocol":"freedom","tag":"direct"},{"protocol":"blackhole","tag":"blocked"}]}' > "$XRAY_CONF_FILE"
     fi
 }
 
-# --- 节点添加 (标准版代码) ---
+# --- 节点添加 (标准逻辑) ---
 add_reality() {
     echo -e "${YELLOW}正在生成配置...${PLAIN}"
     
-    # 因为已经锁定了官方版本，这里可以使用最标准的提取逻辑
+    # 再次检查，防止万一
     RAW_OUT=$($XRAY_BIN x25519)
+    if echo "$RAW_OUT" | grep -q "Password"; then
+        echo -e "${RED}错误：内核仍为魔改版，替换失败。请手动执行 'rm /usr/local/bin/xray' 后重试。${PLAIN}"
+        return
+    fi
     
-    # 标准格式：Private key: xxxxx
+    # 标准提取
     PRIVATE_KEY=$(echo "$RAW_OUT" | grep "Private key:" | awk -F': ' '{print $2}' | tr -d '[:space:]')
     PUBLIC_KEY=$(echo "$RAW_OUT" | grep "Public key:" | awk -F': ' '{print $2}' | tr -d '[:space:]')
 
-    # 双重保险：万一提取失败，报错提示
     if [[ -z "$PRIVATE_KEY" ]] || [[ -z "$PUBLIC_KEY" ]]; then
-        echo -e "${RED}错误：密钥生成失败。请尝试并在菜单中选择 '11' 卸载后重试。${PLAIN}"
-        echo -e "Debug: $RAW_OUT"
+        echo -e "${RED}错误：获取密钥失败。Debug: $RAW_OUT${PLAIN}"
         return
     fi
 
@@ -95,7 +131,7 @@ add_reality() {
     read -p "请输入回落域名 (默认: www.microsoft.com): " DOMAIN
     [[ -z "$DOMAIN" ]] && DOMAIN="www.microsoft.com"
 
-    # 使用 jq 写入配置
+    # 写入配置
     jq --arg uuid "$UUID" \
        --arg port "$PORT" \
        --arg pk "$PRIVATE_KEY" \
@@ -127,7 +163,6 @@ add_reality() {
     IP=$(curl -s4m8 ip.sb)
     LINK="vless://${UUID}@${IP}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${DOMAIN}&sid=${SHORT_ID}&spx=%2F#Reality_${PORT}"
     
-    # 记录
     echo "$LINK" >> /usr/local/etc/xray/links.log
 
     systemctl restart xray
@@ -196,17 +231,16 @@ uninstall() {
 # --- 菜单 ---
 show_menu() {
     clear
-    # 获取版本显示
     VER_INFO=$($XRAY_BIN version 2>/dev/null | head -n 1 | awk '{print $2}')
     [[ -z "$VER_INFO" ]] && VER_INFO="未知"
-
+    
     if systemctl is-active --quiet xray; then X_STATUS="${GREEN}运行中${PLAIN}"; else X_STATUS="${RED}停止${PLAIN}"; fi
     BBR_S=$(sysctl net.ipv4.tcp_congestion_control | awk '{print $3}')
     [[ "$BBR_S" == "bbr" ]] && B_STATUS="${GREEN}已开启${PLAIN}" || B_STATUS="${RED}未开启${PLAIN}"
     MYIP=$(curl -s4m8 ip.sb)
 
     echo -e "=================================================="
-    echo -e "          Reality & Xray 管理脚本 (Lamb v6)       "
+    echo -e "          Reality & Xray 管理脚本 (Lamb v7)       "
     echo -e "=================================================="
     echo -e " 系统状态:"
     echo -e " - Xray 版本: ${GREEN}${VER_INFO}${PLAIN}" 
@@ -215,7 +249,7 @@ show_menu() {
     echo -e "--------------------------------------------------"
     echo -e " [ 节点管理 ]"
     echo -e " 1.  添加 VLESS + Reality 节点"
-    echo -e " 2.  添加 Shadowsocks 节点 (未启用)"
+    echo -e " 2.  添加 Shadowsocks 节点 (开发中)"
     echo -e " 3.  删除 指定节点"
     echo -e " 4.  查看 所有节点 (链接/二维码)"
     echo -e ""
@@ -235,7 +269,7 @@ show_menu() {
 
 check_root
 install_dependencies
-check_and_fix_core  # <--- 启动时自动检查并修复版本
+manual_install_xray  # <--- 执行核弹级替换
 
 while true; do
     show_menu
