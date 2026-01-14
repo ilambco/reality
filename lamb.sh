@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
-# Reality & Xray 管理脚本 (Lamb v9 - FINAL)
-# Xray 固定版本: 25.10.15
+# Reality & Xray 管理脚本 (Lamb v9 FINAL)
+# Xray v25.10.15 固定
 # Reality pbk = Password
 # Tunnel = dokodemo-door
 # ============================================================
@@ -14,11 +14,9 @@ SERVICE_FILE="/etc/systemd/system/xray.service"
 SELF_LINK="/usr/local/bin/lamb"
 
 GREEN="\033[32m"; RED="\033[31m"; YELLOW="\033[33m"; NC="\033[0m"
-
 log(){ echo -e "${GREEN}$1${NC}"; }
 warn(){ echo -e "${YELLOW}$1${NC}"; }
 err(){ echo -e "${RED}$1${NC}"; }
-
 pause(){ read -rp "按回车继续..."; }
 clear_safe(){ clear 2>/dev/null || true; }
 
@@ -66,8 +64,7 @@ ensure_config(){
   [[ -f "$XRAY_CONF" ]] || cat > "$XRAY_CONF" <<EOF
 {
   "log": { "loglevel": "warning" },
-  "inbounds": [],
-  "outbounds": [{ "protocol": "freedom", "tag": "direct" }]
+  "inbounds": []
 }
 EOF
 }
@@ -75,15 +72,31 @@ EOF
 restart_xray(){ systemctl restart xray; }
 server_ip(){ curl -s https://api.ipify.org; }
 
-# ---------------- 节点 ----------------
+# ---------------- 节点数据工具 ----------------
+save_node_meta(){
+  jq --arg n "$1" --arg l "$2" '. + [{"name":$n,"link":$l}]' \
+    "$XRAY_DIR/nodes.json" 2>/dev/null > "$XRAY_DIR/nodes.tmp" \
+    || echo "[{\"name\":\"$1\",\"link\":\"$2\"}]" > "$XRAY_DIR/nodes.tmp"
+  mv "$XRAY_DIR/nodes.tmp" "$XRAY_DIR/nodes.json"
+}
+
+# ---------------- VLESS Reality ----------------
 add_vless_reality(){
-  read -rp "端口: " port
-  read -rp "SNI (必填，如 itunes.apple.com): " sni
-  [[ -z "$sni" ]] && err "SNI 不能为空" && pause && return
+  read -rp "请输入域名或IP（默认使用本机IP）: " host
+  host=${host:-$(server_ip)}
+
+  read -rp "请输入端口（默认10000）: " port
+  port=${port:-10000}
+
+  read -rp "请输入伪装域名（默认itunes.apple.com）: " sni
+  sni=${sni:-itunes.apple.com}
+
+  read -rp "名称 (默认 Reality-${port}): " name
+  name=${name:-Reality-${port}}
 
   keys="$($XRAY_BIN x25519)"
-  priv="$(echo "$keys" | awk -F': ' '/PrivateKey/{print $2}')"
-  pbk="$(echo "$keys" | awk -F': ' '/Password/{print $2}')"
+  priv="$(awk -F': ' '/PrivateKey/{print $2}' <<< "$keys")"
+  pbk="$(awk -F': ' '/Password/{print $2}' <<< "$keys")"
   [[ -z "$priv" || -z "$pbk" ]] && err "Reality 密钥生成失败" && pause && return
 
   uuid=$(cat /proc/sys/kernel/random/uuid)
@@ -111,106 +124,70 @@ add_vless_reality(){
   }]' "$XRAY_CONF" > "$XRAY_CONF.tmp" && mv "$XRAY_CONF.tmp" "$XRAY_CONF"
 
   restart_xray
-  ip=$(server_ip)
-  link="vless://${uuid}@${ip}:${port}?type=tcp&security=reality&pbk=${pbk}&fp=chrome&sni=${sni}&sid=${sid}&spx=%2F&flow=xtls-rprx-vision"
-  log "节点创建成功："
+
+  link="vless://${uuid}@${host}:${port}?type=tcp&security=reality&pbk=${pbk}&fp=chrome&sni=${sni}&sid=${sid}&spx=%2F&flow=xtls-rprx-vision"
+  save_node_meta "$name" "$link"
+
+  log "VLESS Reality 节点已添加"
+  echo "名称: $name"
+  echo "端口: $port"
+  echo "链接:"
   echo "$link"
   qrencode -t ANSIUTF8 "$link" 2>/dev/null
   pause
 }
 
+# ---------------- Shadowsocks ----------------
 add_shadowsocks(){
-  read -rp "端口: " port
-  read -rp "密码: " pass
-  read -rp "加密(aes-128-gcm/chacha20-poly1305): " method
+  read -rp "请输入域名或IP（默认使用本机IP）: " host
+  host=${host:-$(server_ip)}
+
+  read -rp "请输入端口（默认20000）: " port
+  port=${port:-20000}
+
+  read -rp "名称 (默认 SS-${port}): " name
+  name=${name:-SS-${port}}
+
+  pass=$(openssl rand -base64 32)
+  method="2022-blake3-aes-256-gcm"
+
   jq --arg p "$port" --arg pw "$pass" --arg m "$method" \
   '.inbounds += [{
     "port": ($p|tonumber),
     "protocol": "shadowsocks",
     "settings": { "method": $m, "password": $pw, "network": "tcp,udp" }
   }]' "$XRAY_CONF" > "$XRAY_CONF.tmp" && mv "$XRAY_CONF.tmp" "$XRAY_CONF"
+
   restart_xray
-  ip=$(server_ip)
-  ss=$(echo -n "${method}:${pass}@${ip}:${port}" | base64 -w0)
-  echo "ss://${ss}"
-  qrencode -t ANSIUTF8 "ss://${ss}" 2>/dev/null
+
+  raw="${method}:${pass}@${host}:${port}"
+  link="ss://$(echo -n "$raw" | base64 -w0)"
+  save_node_meta "$name" "$link"
+
+  log "Shadowsocks 节点已添加"
+  echo "端口: $port"
+  echo "名称: $name"
+  echo
+  echo "密码: $pass"
+  echo "加密方式: $method"
+  echo "节点链接: $link"
+  qrencode -t ANSIUTF8 "$link" 2>/dev/null
   pause
 }
 
+# ---------------- 查看节点 ----------------
 list_nodes(){
-  jq -r '.inbounds | to_entries[] |
-  "\(.key)) \(.value.protocol) 端口:\(.value.port)"' "$XRAY_CONF"
+  [[ ! -f "$XRAY_DIR/nodes.json" ]] && warn "暂无节点" && pause && return
+  jq -r '.[] | "名称: \(.name)\n端口: (见链接)\n链接:\n\(.link)\n"' "$XRAY_DIR/nodes.json"
   pause
-}
-
-delete_node(){
-  list_nodes
-  read -rp "输入序号删除: " idx
-  jq "del(.inbounds[$idx])" "$XRAY_CONF" > "$XRAY_CONF.tmp" && mv "$XRAY_CONF.tmp" "$XRAY_CONF"
-  restart_xray
-  log "已删除"
-  pause
-}
-
-# ---------------- Tunnel ----------------
-add_tunnel(){
-  read -rp "监听端口: " lp
-  read -rp "目标 IP/域名: " dip
-  read -rp "目标端口: " dp
-  jq --arg lp "$lp" --arg dip "$dip" --arg dp "$dp" \
-  '.inbounds += [{
-    "port": ($lp|tonumber),
-    "protocol": "dokodemo-door",
-    "settings": {
-      "address": $dip,
-      "port": ($dp|tonumber),
-      "network": "tcp,udp"
-    }
-  }]' "$XRAY_CONF" > "$XRAY_CONF.tmp" && mv "$XRAY_CONF.tmp" "$XRAY_CONF"
-  restart_xray
-  log "Tunnel 创建成功"
-  pause
-}
-
-# ---------------- 系统 ----------------
-toggle_bbr(){
-  sysctl net.ipv4.tcp_congestion_control | grep -q bbr && {
-    sysctl -w net.ipv4.tcp_congestion_control=cubic
-    warn "BBR 已关闭"
-  } || {
-    modprobe tcp_bbr
-    sysctl -w net.ipv4.tcp_congestion_control=bbr
-    log "BBR 已开启"
-  }
-  pause
-}
-
-service_ctl(){
-  echo "1. 启动  2. 停止  3. 重启"
-  read -rp "选择: " c
-  case $c in
-    1) systemctl start xray;;
-    2) systemctl stop xray;;
-    3) systemctl restart xray;;
-  esac
-  pause
-}
-
-show_status(){
-  clear_safe
-  echo "================================================"
-  echo "Reality & Xray 管理脚本 (Lamb v9)"
-  echo "================================================"
-  echo "Xray 版本: $XRAY_VERSION"
-  systemctl is-active xray >/dev/null && echo "服务状态: 运行中" || echo "服务状态: 已停止"
-  sysctl net.ipv4.tcp_congestion_control | grep -q bbr && echo "BBR: 已开启" || echo "BBR: 未开启"
-  echo "本机 IP: $(server_ip)"
-  echo "================================================"
 }
 
 # ---------------- 菜单 ----------------
 menu(){
-  show_status
+  clear_safe
+  echo "================================================"
+  echo "Reality & Xray 管理脚本 (Lamb v9)"
+  echo "================================================"
   echo "[ 节点管理 ]"
   echo "1. 添加 VLESS + Reality 节点"
   echo "2. 添加 Shadowsocks 节点"
@@ -232,14 +209,7 @@ menu(){
   case $c in
     1) add_vless_reality;;
     2) add_shadowsocks;;
-    3) delete_node;;
     4) list_nodes;;
-    5) add_tunnel;;
-    6) list_nodes;;
-    8) toggle_bbr;;
-    9) journalctl -u xray -f;;
-    10) service_ctl;;
-    11) rm -f "$SELF_LINK" && log "已删除脚本"; exit 0;;
     0) exit 0;;
   esac
 }
