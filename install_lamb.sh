@@ -2,32 +2,42 @@
 set -euo pipefail
 
 # ==========================================================
-# Reality 小机脚本（Lite） - Compatible with Xray 26.x
-# - nodes/:     一用户一端口节点 (vless/ss inbound)
-# - tunnels/:   tunnel(dokodemo-door) 转发 inbound
-# - outbounds/: 分流出口(通常SS) outbound
-# - routes/:    分流规则(域名列表 -> outboundTag)
+# Reality 小机脚本（Lite） - Release
 #
-# Xray 25.8.31+ / 26.x: xray x25519 输出变为：
+# 功能菜单：
+# 1) 添加 VLESS+Reality 节点（xtls-rprx-vision）
+# 2) 添加 Shadowsocks 节点
+# 3) 查看/导出 所有节点链接
+# 4) 添加 tunnel 转发（dokodemo-door）
+# 5) 删除（节点 / tunnel / 出口 / 规则）
+# 6) 设置分流出口（outbound，SS）
+# 7) 设置分流规则（route，域名列表 -> outboundTag）
+# 8) 查看 Xray 状态
+# 9) 清理坏节点（空 key）
+# 0) 退出
+#
+# 目录结构：
+# /usr/local/etc/xray/
+#   nodes/       入站节点（每用户一端口）
+#   tunnels/     tunnel 转发（dokodemo-door）
+#   outbounds/   分流出口（目前实现 SS）
+#   routes/      分流规则（domain list -> outbound）
+#   backup/      配置备份
+#   config.json  最终 xray 配置
+#
+# 兼容 Xray 26.x：xray x25519 输出：
 #   PrivateKey: ...
-#   Password:   ...   <-- 旧 Public key（用于客户端 pbk）
-#   Hash32:     ...   (REALITY 不用)
-# 来源：Xray-core 维护者说明 Public key 改名 Password。:contentReference[oaicite:1]{index=1}
+#   Password:  ...   (Reality pbk / 旧Public key)
+#   Hash32:    ...   (Reality 不用)
 # ==========================================================
 
-# --------- 基本检查 ----------
+# ---------------- 基本检查 ----------------
 if [[ $EUID -ne 0 ]]; then
   echo "请以 root 运行（sudo 或 root）"
   exit 1
 fi
 
-# 自动创建 lamb 快捷方式（可选）
-if [[ "$(basename "$0")" != "lamb" ]] && [[ ! -f /usr/local/bin/lamb ]]; then
-  cp "$(realpath "$0")" /usr/local/bin/lamb || true
-  chmod +x /usr/local/bin/lamb || true
-fi
-
-# --------- 全局变量 ----------
+# ---------------- 全局变量 ----------------
 XRAY_BIN="/usr/local/bin/xray"
 XRAY_SERVICE="xray.service"
 
@@ -39,7 +49,7 @@ ROUTES_DIR="$BASE_DIR/routes"
 XRAY_CONFIG_PATH="$BASE_DIR/config.json"
 XRAY_CONFIG_BAK_DIR="$BASE_DIR/backup"
 
-# --------- 工具函数 ----------
+# ---------------- 工具函数 ----------------
 now_ts() { date "+%Y-%m-%d %H:%M:%S"; }
 
 die() { echo "错误: $*" >&2; exit 1; }
@@ -55,6 +65,18 @@ get_ip() {
 
 ensure_dirs() {
   mkdir -p "$BASE_DIR" "$NODES_DIR" "$TUNNELS_DIR" "$OUTBOUNDS_DIR" "$ROUTES_DIR" "$XRAY_CONFIG_BAK_DIR"
+}
+
+# 每次运行都同步更新 lamb（解决你遇到的“lamb 还是老版本”）
+sync_lamb() {
+  if [[ "$(basename "$0")" != "lamb" ]]; then
+    # 不存在或内容不同就强制更新
+    if [[ ! -f /usr/local/bin/lamb ]] || ! cmp -s "$(realpath "$0")" /usr/local/bin/lamb; then
+      cp -f "$(realpath "$0")" /usr/local/bin/lamb || die "无法更新快捷方式 lamb"
+      chmod +x /usr/local/bin/lamb || die "无法设置 lamb 执行权限"
+      echo "已更新快捷指令 'lamb' -> /usr/local/bin/lamb"
+    fi
+  fi
 }
 
 install_deps() {
@@ -86,7 +108,7 @@ bootstrap() {
 
   systemctl enable "$XRAY_SERVICE" >/dev/null 2>&1 || true
 
-  # 没有配置先生成一个空配置（避免服务无配置启动失败）
+  # 没有配置先生成一个最小配置，避免 service 启动失败
   if [[ ! -f "$XRAY_CONFIG_PATH" ]]; then
     cat > "$XRAY_CONFIG_PATH" <<EOF
 {
@@ -105,7 +127,7 @@ status_xray() {
   systemctl status "$XRAY_SERVICE" --no-pager || true
 }
 
-# --------- 配置安全写入 + 校验 + 回滚 ----------
+# ---------------- 配置安全写入 ----------------
 apply_config_safely() {
   local tmp="$XRAY_CONFIG_PATH.tmp"
   local bak="$XRAY_CONFIG_BAK_DIR/config_$(date +%Y%m%d_%H%M%S).json"
@@ -113,11 +135,9 @@ apply_config_safely() {
   # jq 校验
   jq . "$tmp" >/dev/null 2>&1 || die "生成的 JSON 配置无效（jq 校验未通过）"
 
-  # 官方推荐测试：xray run -test -c <config>
+  # xray 官方测试：xray run -test -c <config>
   if [[ -x "$XRAY_BIN" ]]; then
-    if "$XRAY_BIN" run -test -c "$tmp" >/dev/null 2>&1; then
-      :
-    else
+    if ! "$XRAY_BIN" run -test -c "$tmp" >/dev/null 2>&1; then
       echo "警告: Xray 配置测试未通过（xray run -test -c ...），将不应用该配置"
       exit 1
     fi
@@ -143,54 +163,41 @@ apply_config_safely() {
   fi
 }
 
-# --------- x25519 解析（兼容新旧输出） ----------
-# 新版：PrivateKey + Password（Password=旧 Public key，用于 pbk）
-# 旧版：Private key + Public key
+# ---------------- x25519 解析（适配 Xray 26.x） ----------------
+# 新版输出：
+#   PrivateKey: ...
+#   Password:  ...   (Reality pbk / 旧Public key)
+# 旧版输出：
+#   Private key: ...
+#   Public key: ...
 get_x25519_keys() {
   local out priv pub
-
-  # 把 stderr 也抓进来（有些实现会写到 stderr）
   out="$("$XRAY_BIN" x25519 2>&1 || true)"
 
-  # 1) 新版：PrivateKey
-  priv="$(echo "$out" | awk -F': *' '
-    BEGIN{IGNORECASE=1}
-    $1 ~ /^privatekey$/ {print $2; exit}
-  ' | tr -d '\r' | xargs)"
+  # 新版字段
+  priv="$(echo "$out" | awk -F': *' 'BEGIN{IGNORECASE=1} $1 ~ /^privatekey$/ {print $2; exit}' | xargs)"
+  pub="$(echo "$out"  | awk -F': *' 'BEGIN{IGNORECASE=1} $1 ~ /^password$/   {print $2; exit}' | xargs)"
 
-  # 2) 新版：Password（就是 pbk / 旧 Public key）
-  pub="$(echo "$out" | awk -F': *' '
-    BEGIN{IGNORECASE=1}
-    $1 ~ /^password$/ {print $2; exit}
-  ' | tr -d '\r' | xargs)"
-
-  # 兜底：旧版输出（Private key / Public key）
+  # 旧版兜底
   if [[ -z "$priv" ]]; then
-    priv="$(echo "$out" | awk -F': *' '
-      BEGIN{IGNORECASE=1}
-      $1 ~ /^private key$/ {print $2; exit}
-    ' | tr -d '\r' | xargs)"
+    priv="$(echo "$out" | awk -F': *' 'BEGIN{IGNORECASE=1} $1 ~ /^private key$/ {print $2; exit}' | xargs)"
   fi
   if [[ -z "$pub" ]]; then
-    pub="$(echo "$out" | awk -F': *' '
-      BEGIN{IGNORECASE=1}
-      $1 ~ /^public key$/ {print $2; exit}
-    ' | tr -d '\r' | xargs)"
+    pub="$(echo "$out"  | awk -F': *' 'BEGIN{IGNORECASE=1} $1 ~ /^public key$/  {print $2; exit}' | xargs)"
   fi
 
   if [[ -z "$priv" || -z "$pub" ]]; then
-    echo "无法解析到 x25519 私钥/公钥(Password)。xray x25519 原始输出如下："
-    echo "--------------------------------------------------"
+    echo "无法解析到 x25519 私钥/公钥（Password）。原始输出如下："
+    echo "------------------------------"
     echo "$out"
-    echo "--------------------------------------------------"
+    echo "------------------------------"
     return 1
   fi
 
   echo "$priv|$pub"
-  return 0
 }
 
-# --------- 核心：从实体文件生成 config ----------
+# ---------------- 生成配置（从实体文件拼装） ----------------
 generate_config() {
   ensure_dirs
 
@@ -313,7 +320,7 @@ EOF
   outbounds_json="$(echo "$outbounds_json" | jq '. + [{"tag":"direct","protocol":"freedom"}]')"
   outbounds_json="$(echo "$outbounds_json" | jq '. + [{"tag":"block","protocol":"blackhole"}]')"
 
-  # ---- outbounds: custom (only shadowsocks for now) ----
+  # ---- outbounds: custom（仅实现 shadowsocks） ----
   for f in "$OUTBOUNDS_DIR"/*.json; do
     local enabled
     enabled="$(jq -r '.enabled // true' "$f")"
@@ -399,7 +406,7 @@ EOF
   apply_config_safely
 }
 
-# --------- 实体创建 ----------
+# ---------------- 添加节点：VLESS+Reality ----------------
 add_vless_node() {
   ensure_dirs
   install_xray_if_missing
@@ -422,10 +429,10 @@ add_vless_node() {
   short_id="$(openssl rand -hex 2)"
   created="$(now_ts)"
 
-  local kp priv pub
+  local kp priv pbk
   kp="$(get_x25519_keys)" || die "无法解析 x25519 的私钥/公钥，请检查 Xray 输出"
   priv="${kp%%|*}"
-  pub="${kp##*|}"
+  pbk="${kp##*|}"
 
   local file="$NODES_DIR/vless_${port}_${uuid}.json"
   cat > "$file" <<EOF
@@ -439,20 +446,21 @@ add_vless_node() {
   "domain": $(jq -Rn --arg v "$domain" '$v'),
   "server_name": $(jq -Rn --arg v "$server_name" '$v'),
   "private_key": "$priv",
-  "public_key": "$pub",
+  "public_key": "$pbk",
   "short_id": "$short_id"
 }
 EOF
 
   echo "已添加 VLESS+Reality 节点：$file"
-  echo "Reality 公钥（pbk / Password）: $pub"
+  echo "Reality pbk（Xray x25519 的 Password）: $pbk"
 
   generate_config
 
   echo "节点链接："
-  echo "vless://${uuid}@${domain}:${port}?type=tcp&security=reality&pbk=${pub}&fp=chrome&sni=${server_name}&sid=${short_id}&spx=%2F&flow=xtls-rprx-vision#Reality-${port}"
+  echo "vless://${uuid}@${domain}:${port}?type=tcp&security=reality&pbk=${pbk}&fp=chrome&sni=${server_name}&sid=${short_id}&spx=%2F&flow=xtls-rprx-vision#Reality-${port}"
 }
 
+# ---------------- 添加节点：Shadowsocks ----------------
 add_ss_node() {
   ensure_dirs
 
@@ -490,6 +498,7 @@ EOF
   echo "ss://${userinfo}@${ip}:${port}#SS-${port}"
 }
 
+# ---------------- 添加 tunnel（dokodemo-door） ----------------
 add_tunnel() {
   ensure_dirs
 
@@ -527,7 +536,7 @@ EOF
   generate_config
 }
 
-# --------- 查看/导出 ----------
+# ---------------- 查看/导出 ----------------
 view_export_all() {
   ensure_dirs
   local export_file="/root/xray_export_$(date +%Y%m%d_%H%M%S).txt"
@@ -543,17 +552,17 @@ view_export_all() {
   shopt -s nullglob
   for f in "$NODES_DIR"/vless_*.json; do
     has=true
-    local uuid port domain server_name pub short_id remark enabled
+    local uuid port domain server_name pbk short_id remark enabled
     enabled="$(jq -r '.enabled // true' "$f")"
     uuid="$(jq -r '.uuid' "$f")"
     port="$(jq -r '.port' "$f")"
     domain="$(jq -r '.domain' "$f")"
     server_name="$(jq -r '.server_name' "$f")"
-    pub="$(jq -r '.public_key' "$f")"
+    pbk="$(jq -r '.public_key' "$f")"
     short_id="$(jq -r '.short_id' "$f")"
     remark="$(jq -r '.remark // ""' "$f")"
 
-    local link="vless://${uuid}@${domain}:${port}?type=tcp&security=reality&pbk=${pub}&fp=chrome&sni=${server_name}&sid=${short_id}&spx=%2F&flow=xtls-rprx-vision#Reality-${port}"
+    local link="vless://${uuid}@${domain}:${port}?type=tcp&security=reality&pbk=${pbk}&fp=chrome&sni=${server_name}&sid=${short_id}&spx=%2F&flow=xtls-rprx-vision#Reality-${port}"
     echo "[$(basename "$f")] enabled=$enabled remark=${remark}"
     echo "$link"
     echo "[$(basename "$f")] enabled=$enabled remark=${remark}" >>"$export_file"
@@ -609,7 +618,7 @@ view_export_all() {
   echo -e "\n导出文件：$export_file"
 }
 
-# --------- 删除（统一入口） ----------
+# ---------------- 删除（统一入口） ----------------
 pick_and_delete() {
   ensure_dirs
   echo "请选择要删除的类型："
@@ -654,7 +663,7 @@ pick_and_delete() {
   generate_config
 }
 
-# --------- 分流出口（outbound） ----------
+# ---------------- 分流出口（outbound） ----------------
 set_split_outbound() {
   ensure_dirs
   echo "添加/更新 分流出口（建议填 TW 的 SS 节点）"
@@ -696,7 +705,7 @@ EOF
   generate_config
 }
 
-# --------- 分流规则（route） ----------
+# ---------------- 分流规则（route） ----------------
 set_split_rule() {
   ensure_dirs
   echo "创建/更新 分流规则（不内置规则，你输入域名列表即可）"
@@ -741,16 +750,16 @@ EOF
   generate_config
 }
 
-# --------- 清理坏节点（空 key） ----------
+# ---------------- 清理坏节点（空 key） ----------------
 cleanup_broken_nodes() {
   ensure_dirs
   local count=0
   shopt -s nullglob
   for f in "$NODES_DIR"/vless_*.json; do
-    local priv pub
+    local priv pbk
     priv="$(jq -r '.private_key // ""' "$f")"
-    pub="$(jq -r '.public_key // ""' "$f")"
-    if [[ -z "$priv" || "$priv" == "null" || -z "$pub" || "$pub" == "null" ]]; then
+    pbk="$(jq -r '.public_key // ""' "$f")"
+    if [[ -z "$priv" || "$priv" == "null" || -z "$pbk" || "$pbk" == "null" ]]; then
       echo "删除坏的 VLESS 节点文件（空 key）: $(basename "$f")"
       rm -f "$f"
       ((count++))
@@ -760,7 +769,7 @@ cleanup_broken_nodes() {
   generate_config
 }
 
-# --------- 菜单 ----------
+# ---------------- 菜单 ----------------
 show_menu() {
   echo "======== Reality 小机脚本（Lite）========"
   echo "1) 添加 VLESS+Reality 节点"
@@ -777,6 +786,7 @@ show_menu() {
 }
 
 main() {
+  sync_lamb
   bootstrap
 
   while true; do
