@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # ==========================================
-# Reality & Xray 管理脚本 (Lamb 最终修复版)
-# 修复：兼容非常规 Xray 版本密钥生成
+# Reality & Xray 管理脚本 (Lamb v4 最终修正)
+# 修复：x25519 -i 参数传递方式错误
 # ==========================================
 
 # --- 核心配置变量 ---
@@ -23,7 +23,7 @@ check_root() {
 
 install_dependencies() {
     if ! command -v jq &> /dev/null; then
-        echo -e "${YELLOW}安装 jq...${PLAIN}"
+        echo -e "${YELLOW}安装必要组件 (jq)...${PLAIN}"
         if [ -f /etc/debian_version ]; then
             apt-get update -y && apt-get install -y jq curl openssl >/dev/null 2>&1
         else
@@ -43,41 +43,45 @@ install_xray_core() {
     fi
 }
 
-# --- 核心修复：密钥生成函数 ---
+# --- 核心修复：密钥生成函数 (v4) ---
 generate_keys() {
-    # 1. 尝试直接生成
+    # 1. 生成原始私钥
+    # 你的版本输出格式为 "PrivateKey: xxxxx" (无空格)
     RAW_OUT=$($XRAY_BIN x25519)
     
-    # 2. 暴力提取 Private Key (兼容 "Private key:" 和 "PrivateKey:")
-    # grep -i 忽略大小写，cut -d: -f2 取冒号后面部分，tr -d 删除所有空格换行
-    PRIVATE_KEY=$(echo "$RAW_OUT" | grep -i "Private" | head -n 1 | cut -d: -f2 | tr -d '[:space:]')
-    
-    # 3. 提取 Public Key
-    PUBLIC_KEY=$(echo "$RAW_OUT" | grep -i "Public" | head -n 1 | cut -d: -f2 | tr -d '[:space:]')
+    # 提取私钥：忽略大小写匹配 Private，用冒号分割取第2段，删除所有空白字符
+    PRIVATE_KEY=$(echo "$RAW_OUT" | grep -i "Private" | cut -d: -f2 | tr -d '[:space:]')
 
-    # 4. 【关键修复】如果 Public Key 是空的 (你的情况)，用 Private Key 反推
-    if [[ -n "$PRIVATE_KEY" ]] && [[ -z "$PUBLIC_KEY" ]]; then
-        # echo "尝试反推公钥..." 
-        # 将私钥喂回 xray 计算公钥
-        CALC_OUT=$(echo "$PRIVATE_KEY" | $XRAY_BIN x25519 -i)
-        PUBLIC_KEY=$(echo "$CALC_OUT" | grep -i "Public" | head -n 1 | cut -d: -f2 | tr -d '[:space:]')
-    fi
-
-    # 5. 最终检查
-    if [[ -z "$PRIVATE_KEY" ]] || [[ -z "$PUBLIC_KEY" ]]; then
-        echo -e "${RED}严重错误：无法生成有效的 Xray 密钥对。${PLAIN}"
-        echo -e "Debug Raw: $RAW_OUT"
+    if [[ -z "$PRIVATE_KEY" ]]; then
+        echo -e "${RED}错误：无法获取私钥。Xray 输出为: $RAW_OUT${PLAIN}"
         return 1
     fi
+
+    # 2. 强制反推公钥 (修复点：使用参数传递而非管道)
+    # 语法：xray x25519 -i "私钥"
+    CALC_OUT=$($XRAY_BIN x25519 -i "$PRIVATE_KEY")
+    
+    # 从反推结果中提取 Public Key
+    # 反推结果通常包含 "Public key: yyyyy"
+    PUBLIC_KEY=$(echo "$CALC_OUT" | grep -i "Public" | cut -d: -f2 | tr -d '[:space:]')
+
+    # 3. 最终检查
+    if [[ -z "$PUBLIC_KEY" ]]; then
+        echo -e "${RED}严重错误：无法反推公钥。${PLAIN}"
+        echo -e "私钥: $PRIVATE_KEY"
+        echo -e "反推输出: $CALC_OUT"
+        return 1
+    fi
+    
     return 0
 }
 
 # --- 功能函数 ---
 
 add_reality() {
-    echo -e "${YELLOW}正在生成配置...${PLAIN}"
+    echo -e "${YELLOW}正在计算密钥与生成配置...${PLAIN}"
     
-    # 调用上面的修复版密钥生成
+    # 调用修复后的密钥生成
     if ! generate_keys; then return; fi
     
     UUID=$($XRAY_BIN uuid)
@@ -87,7 +91,7 @@ add_reality() {
     read -p "请输入回落域名 (默认: www.microsoft.com): " DOMAIN
     [[ -z "$DOMAIN" ]] && DOMAIN="www.microsoft.com"
 
-    # 写入配置
+    # 写入配置 (jq)
     jq --arg uuid "$UUID" \
        --arg port "$PORT" \
        --arg pk "$PRIVATE_KEY" \
@@ -122,6 +126,7 @@ add_reality() {
     # 保存链接
     echo "$LINK" >> /usr/local/etc/xray/links.log
 
+    # 重启
     systemctl restart xray
     sleep 1
 
@@ -196,7 +201,7 @@ show_menu() {
     MYIP=$(curl -s4m8 ip.sb)
 
     echo -e "=================================================="
-    echo -e "          Reality & Xray 管理脚本 (Lamb v3)       "
+    echo -e "          Reality & Xray 管理脚本 (Lamb v4)       "
     echo -e "=================================================="
     echo -e " 系统状态:"
     echo -e " - Xray 服务: ${X_STATUS}    - BBR 加速: ${B_STATUS}"
