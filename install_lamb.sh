@@ -94,12 +94,17 @@ apply_config_safely() {
 
   # xray -test（可用则启用）
   if [[ -x "$XRAY_BIN" ]]; then
-    if "$XRAY_BIN" run -test -config "$tmp" >/dev/null 2>&1; then
-      :
-    else
-      echo "警告: xray -test 校验未通过，将不应用该配置"
-      exit 1
-    fi
+    if [[ -x "$XRAY_BIN" ]]; then
+  if "$XRAY_BIN" run -test -config "$tmp" >/dev/null 2>&1; then
+    :
+  elif "$XRAY_BIN" -test -config "$tmp" >/dev/null 2>&1; then
+    :
+  else
+    echo "警告: Xray 配置测试未通过（run -test / -test 均失败），将不应用该配置"
+    exit 1
+  fi
+fi
+
   fi
 
   # 备份旧配置
@@ -340,9 +345,21 @@ add_vless_node() {
 
   local uuid keys priv pub short_id created
   uuid="$("$XRAY_BIN" uuid)"
-  keys="$("$XRAY_BIN" x25519)"
-  priv="$(echo "$keys" | awk '/Private/{print $3}')"
-  pub="$(echo "$keys" | awk '/Public/{print $3}')"
+  keys="$("$XRAY_BIN" x25519 2>/dev/null || true)"
+  priv="$(echo "$keys" | awk -F': *' 'tolower($0) ~ /private/ {print $2; exit}' | tr -d '\r' | xargs)"
+  pub="$(echo "$keys"  | awk -F': *' 'tolower($0) ~ /public/  {print $2; exit}' | tr -d '\r' | xargs)"
+
+  # 兜底：如果没带冒号，按空格拆
+  if [[ -z "$priv" || -z "$pub" ]]; then
+    priv="$(echo "$keys" | awk 'tolower($0) ~ /private/ {print $NF; exit}' | tr -d '\r' | xargs)"
+    pub="$(echo "$keys"  | awk 'tolower($0) ~ /public/  {print $NF; exit}' | tr -d '\r' | xargs)"
+  fi
+
+  if [[ -z "$priv" || -z "$pub" ]]; then
+    echo "xray x25519 输出如下（用于排查）："
+    echo "$keys"
+    die "无法解析 x25519 的私钥/公钥，请检查 Xray 版本输出格式"
+  fi
   short_id="$(openssl rand -hex 2)"
   created="$(now_ts)"
 
