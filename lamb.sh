@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-# Reality & Xray 管理脚本 (Lamb v9 FINAL FIX)
+# Reality & Xray 管理脚本 (Lamb v9 FINAL STABLE)
 # ============================================================
 
 XRAY_VERSION="25.10.15"
@@ -11,7 +11,12 @@ SERVICE_FILE="/etc/systemd/system/xray.service"
 META_FILE="$XRAY_DIR/nodes.json"
 SELF_LINK="/usr/local/bin/lamb"
 
-GREEN="\033[32m"; RED="\033[31m"; YELLOW="\033[33m"; NC="\033[0m"
+GREEN="\033[32m"
+RED="\033[31m"
+YELLOW="\033[33m"
+BLUE="\033[36m"
+NC="\033[0m"
+
 log(){ echo -e "${GREEN}$1${NC}"; }
 warn(){ echo -e "${YELLOW}$1${NC}"; }
 err(){ echo -e "${RED}$1${NC}"; }
@@ -66,7 +71,24 @@ EOF
 restart_xray(){ systemctl restart xray; }
 server_ip(){ curl -s https://api.ipify.org; }
 
-# ---------------- Reality ----------------
+# ---------------- BBR ----------------
+bbr_status(){
+  [[ "$(sysctl -n net.core.default_qdisc 2>/dev/null)" == "fq" && \
+     "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" == "bbr" ]]
+}
+
+enable_bbr(){
+  modprobe tcp_bbr 2>/dev/null || true
+  sysctl -w net.core.default_qdisc=fq >/dev/null
+  sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null
+  grep -q "net.core.default_qdisc=fq" /etc/sysctl.conf || echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+  grep -q "net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf || echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+  sysctl -p >/dev/null
+  log "BBR + fq 已启用"
+  pause
+}
+
+# ---------------- VLESS Reality ----------------
 add_vless_reality(){
   read -rp "请输入端口（默认10000）: " port
   port=${port:-10000}
@@ -122,6 +144,7 @@ add_shadowsocks(){
   read -rp "请输入端口（默认20000）: " port
   port=${port:-20000}
   name="SS-${port}"
+
   pass=$(openssl rand -base64 32)
   method="2022-blake3-aes-256-gcm"
 
@@ -170,10 +193,14 @@ header(){
   clear_safe
   echo "Reality & Xray 管理脚本 (Lamb v9)"
   echo "---------------------------------"
-  echo "Xray 版本: $XRAY_VERSION"
-  systemctl is-active xray >/dev/null && echo "Xray 状态: 运行中" || echo "Xray 状态: 已停止"
-  sysctl net.ipv4.tcp_congestion_control | grep -q bbr && echo "BBR: 已开启" || echo "BBR: 未开启"
-  echo "本机 IP: $(server_ip)"
+  echo -e "Xray 版本: ${GREEN}${XRAY_VERSION}${NC}"
+  systemctl is-active xray >/dev/null \
+    && echo -e "Xray 状态: ${GREEN}运行中${NC}" \
+    || echo -e "Xray 状态: ${RED}已停止${NC}"
+  bbr_status \
+    && echo -e "BBR: ${GREEN}已开启${NC}" \
+    || echo -e "BBR: ${RED}未开启${NC}"
+  echo -e "本机 IP: ${BLUE}$(server_ip)${NC}"
   echo "---------------------------------"
 }
 
@@ -185,22 +212,18 @@ menu(){
   echo "3. 删除 指定节点"
   echo "4. 查看 所有节点 (链接/二维码)"
   echo
-  echo "[ 隧道管理 (Tunnel) ]"
-  echo "5. 添加 端口转发 (Tunnel)"
-  echo "6. 查看/删除 隧道列表"
-  echo
   echo "[ 系统工具 ]"
-  echo "8. 开启/关闭 BBR 加速"
+  echo "8. 启用 BBR + fq"
   echo "9. 查看 Xray 实时日志"
-  echo "10. 服务控制：启动/停止/重启"
-  echo "11. 删除脚本"
   echo "0. 退出脚本"
-  read -rp "请输入选项 [0-11]: " c
+  read -rp "请输入选项 [0-9]: " c
   case $c in
     1) add_vless_reality;;
     2) add_shadowsocks;;
     3) delete_node;;
     4) list_nodes;;
+    8) enable_bbr;;
+    9) journalctl -u xray -f;;
     0) exit 0;;
   esac
 }
