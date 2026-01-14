@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-# Reality & Xray 管理脚本 (Lamb v9 FINAL STABLE)
+# Reality & Xray 管理脚本 (Lamb v9 FINAL FIX)
 # ============================================================
 
 XRAY_VERSION="25.10.15"
@@ -73,22 +73,27 @@ server_ip(){ curl -s https://api.ipify.org; }
 
 # ---------------- BBR ----------------
 bbr_status(){
-  [[ "$(sysctl -n net.core.default_qdisc 2>/dev/null)" == "fq" && \
-     "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" == "bbr" ]]
+  qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
+  cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+  [[ "$qdisc" == "fq" && "$cc" == "bbr" ]]
 }
 
 enable_bbr(){
   modprobe tcp_bbr 2>/dev/null || true
   sysctl -w net.core.default_qdisc=fq >/dev/null
   sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null
-  grep -q "net.core.default_qdisc=fq" /etc/sysctl.conf || echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
-  grep -q "net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf || echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+
+  grep -q "net.core.default_qdisc=fq" /etc/sysctl.conf || \
+    echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+  grep -q "net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf || \
+    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+
   sysctl -p >/dev/null
   log "BBR + fq 已启用"
   pause
 }
 
-# ---------------- VLESS Reality ----------------
+# ---------------- Reality ----------------
 add_vless_reality(){
   read -rp "请输入端口（默认10000）: " port
   port=${port:-10000}
@@ -133,7 +138,6 @@ add_vless_reality(){
 
   jq --arg n "$name" --arg l "$link" '. += [{"name":$n,"link":$l}]' "$META_FILE" > "$META_FILE.tmp" && mv "$META_FILE.tmp" "$META_FILE"
 
-  log "节点已添加：$name"
   echo "$link"
   qrencode -t ANSIUTF8 "$link" 2>/dev/null
   pause
@@ -163,7 +167,6 @@ add_shadowsocks(){
 
   jq --arg n "$name" --arg l "$link" '. += [{"name":$n,"link":$l}]' "$META_FILE" > "$META_FILE.tmp" && mv "$META_FILE.tmp" "$META_FILE"
 
-  log "Shadowsocks 节点已添加：$name"
   echo "$link"
   qrencode -t ANSIUTF8 "$link" 2>/dev/null
   pause
@@ -184,7 +187,6 @@ delete_node(){
   jq "del(.inbounds[] | select(.tag==\"$name\"))" "$XRAY_CONF" > "$XRAY_CONF.tmp" && mv "$XRAY_CONF.tmp" "$XRAY_CONF"
 
   restart_xray
-  log "已删除节点：$name"
   pause
 }
 
@@ -194,12 +196,16 @@ header(){
   echo "Reality & Xray 管理脚本 (Lamb v9)"
   echo "---------------------------------"
   echo -e "Xray 版本: ${GREEN}${XRAY_VERSION}${NC}"
-  systemctl is-active xray >/dev/null \
-    && echo -e "Xray 状态: ${GREEN}运行中${NC}" \
-    || echo -e "Xray 状态: ${RED}已停止${NC}"
-  bbr_status \
-    && echo -e "BBR: ${GREEN}已开启${NC}" \
-    || echo -e "BBR: ${RED}未开启${NC}"
+  if systemctl is-active xray >/dev/null; then
+    echo -e "Xray 状态: ${GREEN}运行中${NC}"
+  else
+    echo -e "Xray 状态: ${RED}已停止${NC}"
+  fi
+  if bbr_status; then
+    echo -e "BBR: ${GREEN}已开启${NC}"
+  else
+    echo -e "BBR: ${RED}未开启${NC}"
+  fi
   echo -e "本机 IP: ${BLUE}$(server_ip)${NC}"
   echo "---------------------------------"
 }
@@ -212,11 +218,17 @@ menu(){
   echo "3. 删除 指定节点"
   echo "4. 查看 所有节点 (链接/二维码)"
   echo
+  echo "[ 隧道管理 (Tunnel) ]"
+  echo "5. 添加 端口转发 (Tunnel)"
+  echo "6. 查看/删除 隧道列表"
+  echo
   echo "[ 系统工具 ]"
-  echo "8. 启用 BBR + fq"
+  echo "8. 开启 BBR 加速"
   echo "9. 查看 Xray 实时日志"
+  echo "10. 服务控制：启动/停止/重启"
+  echo "11. 删除脚本"
   echo "0. 退出脚本"
-  read -rp "请输入选项 [0-9]: " c
+  read -rp "请输入选项 [0-11]: " c
   case $c in
     1) add_vless_reality;;
     2) add_shadowsocks;;
