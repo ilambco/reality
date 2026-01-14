@@ -2,16 +2,17 @@
 set -euo pipefail
 
 # ==========================================================
-# Reality 小机脚本（Lite） - Fixed
+# Reality 小机脚本（Lite） - Compatible with Xray 26.x
 # - nodes/:     一用户一端口节点 (vless/ss inbound)
 # - tunnels/:   tunnel(dokodemo-door) 转发 inbound
 # - outbounds/: 分流出口(通常SS) outbound
 # - routes/:    分流规则(域名列表 -> outboundTag)
 #
-# Fixes:
-# 1) Robust xray x25519 parsing (avoid empty pub/priv key)
-# 2) Use official config test: xray run -test -c <config>
-# 3) Add cleanup for broken vless node files (empty keys)
+# Xray 25.8.31+ / 26.x: xray x25519 输出变为：
+#   PrivateKey: ...
+#   Password:   ...   <-- 旧 Public key（用于客户端 pbk）
+#   Hash32:     ...   (REALITY 不用)
+# 来源：Xray-core 维护者说明 Public key 改名 Password。:contentReference[oaicite:1]{index=1}
 # ==========================================================
 
 # --------- 基本检查 ----------
@@ -85,7 +86,7 @@ bootstrap() {
 
   systemctl enable "$XRAY_SERVICE" >/dev/null 2>&1 || true
 
-  # 如果没有配置先生成一个空配置（避免服务无配置启动失败）
+  # 没有配置先生成一个空配置（避免服务无配置启动失败）
   if [[ ! -f "$XRAY_CONFIG_PATH" ]]; then
     cat > "$XRAY_CONFIG_PATH" <<EOF
 {
@@ -142,6 +143,53 @@ apply_config_safely() {
   fi
 }
 
+# --------- x25519 解析（兼容新旧输出） ----------
+# 新版：PrivateKey + Password（Password=旧 Public key，用于 pbk）
+# 旧版：Private key + Public key
+get_x25519_keys() {
+  local out priv pub
+
+  # 把 stderr 也抓进来（有些实现会写到 stderr）
+  out="$("$XRAY_BIN" x25519 2>&1 || true)"
+
+  # 1) 新版：PrivateKey
+  priv="$(echo "$out" | awk -F': *' '
+    BEGIN{IGNORECASE=1}
+    $1 ~ /^privatekey$/ {print $2; exit}
+  ' | tr -d '\r' | xargs)"
+
+  # 2) 新版：Password（就是 pbk / 旧 Public key）
+  pub="$(echo "$out" | awk -F': *' '
+    BEGIN{IGNORECASE=1}
+    $1 ~ /^password$/ {print $2; exit}
+  ' | tr -d '\r' | xargs)"
+
+  # 兜底：旧版输出（Private key / Public key）
+  if [[ -z "$priv" ]]; then
+    priv="$(echo "$out" | awk -F': *' '
+      BEGIN{IGNORECASE=1}
+      $1 ~ /^private key$/ {print $2; exit}
+    ' | tr -d '\r' | xargs)"
+  fi
+  if [[ -z "$pub" ]]; then
+    pub="$(echo "$out" | awk -F': *' '
+      BEGIN{IGNORECASE=1}
+      $1 ~ /^public key$/ {print $2; exit}
+    ' | tr -d '\r' | xargs)"
+  fi
+
+  if [[ -z "$priv" || -z "$pub" ]]; then
+    echo "无法解析到 x25519 私钥/公钥(Password)。xray x25519 原始输出如下："
+    echo "--------------------------------------------------"
+    echo "$out"
+    echo "--------------------------------------------------"
+    return 1
+  fi
+
+  echo "$priv|$pub"
+  return 0
+}
+
 # --------- 核心：从实体文件生成 config ----------
 generate_config() {
   ensure_dirs
@@ -167,7 +215,7 @@ generate_config() {
       privkey="$(jq -r '.private_key' "$f")"
       short_id="$(jq -r '.short_id' "$f")"
 
-      # 防止坏文件导致整体无法应用：跳过空 key 的 vless
+      # 跳过坏文件（private_key 为空）
       if [[ -z "$privkey" || "$privkey" == "null" ]]; then
         echo "警告: 跳过坏的 VLESS 文件（private_key 为空）: $(basename "$f")"
         continue
@@ -338,9 +386,7 @@ EOF
   # ---- write tmp config ----
   cat > "$XRAY_CONFIG_PATH.tmp" <<EOF
 {
-  "log": {
-    "loglevel": "warning"
-  },
+  "log": { "loglevel": "warning" },
   "inbounds": $inbounds_json,
   "outbounds": $outbounds_json,
   "routing": {
@@ -351,31 +397,6 @@ EOF
 EOF
 
   apply_config_safely
-}
-
-# --------- robust x25519 parsing ----------
-get_x25519_keys() {
-  local keys priv pub
-  keys="$("$XRAY_BIN" x25519 2>/dev/null || true)"
-
-  # 优先解析 "xxx: yyy"
-  priv="$(echo "$keys" | awk -F': *' 'tolower($0) ~ /private/ {print $2; exit}' | tr -d '\r' | xargs)"
-  pub="$(echo "$keys"  | awk -F': *' 'tolower($0) ~ /public/  {print $2; exit}' | tr -d '\r' | xargs)"
-
-  # 兜底：没有冒号就取最后一列
-  if [[ -z "$priv" || -z "$pub" ]]; then
-    priv="$(echo "$keys" | awk 'tolower($0) ~ /private/ {print $NF; exit}' | tr -d '\r' | xargs)"
-    pub="$(echo "$keys"  | awk 'tolower($0) ~ /public/  {print $NF; exit}' | tr -d '\r' | xargs)"
-  fi
-
-  if [[ -z "$priv" || -z "$pub" ]]; then
-    echo "xray x25519 输出如下（用于排查）："
-    echo "$keys"
-    return 1
-  fi
-
-  echo "$priv|$pub"
-  return 0
 }
 
 # --------- 实体创建 ----------
@@ -402,9 +423,7 @@ add_vless_node() {
   created="$(now_ts)"
 
   local kp priv pub
-  if ! kp="$(get_x25519_keys)"; then
-    die "无法解析 x25519 的私钥/公钥，请检查 Xray 版本输出格式"
-  fi
+  kp="$(get_x25519_keys)" || die "无法解析 x25519 的私钥/公钥，请检查 Xray 输出"
   priv="${kp%%|*}"
   pub="${kp##*|}"
 
@@ -426,7 +445,7 @@ add_vless_node() {
 EOF
 
   echo "已添加 VLESS+Reality 节点：$file"
-  echo "Reality 公钥: $pub"
+  echo "Reality 公钥（pbk / Password）: $pub"
 
   generate_config
 
@@ -520,7 +539,6 @@ view_export_all() {
   # VLESS
   echo -e "\n[VLESS+Reality]"
   echo -e "\n[VLESS+Reality]" >>"$export_file"
-
   local has=false
   shopt -s nullglob
   for f in "$NODES_DIR"/vless_*.json; do
@@ -547,7 +565,6 @@ view_export_all() {
   # SS
   echo -e "\n[Shadowsocks]"
   echo -e "\n[Shadowsocks]" >>"$export_file"
-
   local ip userinfo
   ip="$(get_ip)"
   has=false
@@ -573,7 +590,6 @@ view_export_all() {
   # Tunnels
   echo -e "\n================ tunnel 列表（tunnels） ================"
   echo -e "\n================ tunnel 列表（tunnels） ================" >>"$export_file"
-
   has=false
   for f in "$TUNNELS_DIR"/*.json; do
     has=true
