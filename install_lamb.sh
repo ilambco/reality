@@ -2,11 +2,16 @@
 set -euo pipefail
 
 # ==========================================================
-# Reality 小机脚本（Lite）
-# - nodes/:   一用户一端口节点 (vless/ss inbound)
-# - tunnels/: tunnel(dokodemo-door) 转发 inbound
+# Reality 小机脚本（Lite） - Fixed
+# - nodes/:     一用户一端口节点 (vless/ss inbound)
+# - tunnels/:   tunnel(dokodemo-door) 转发 inbound
 # - outbounds/: 分流出口(通常SS) outbound
-# - routes/:  分流规则(域名列表 -> outboundTag)
+# - routes/:    分流规则(域名列表 -> outboundTag)
+#
+# Fixes:
+# 1) Robust xray x25519 parsing (avoid empty pub/priv key)
+# 2) Use official config test: xray run -test -c <config>
+# 3) Add cleanup for broken vless node files (empty keys)
 # ==========================================================
 
 # --------- 基本检查 ----------
@@ -24,6 +29,7 @@ fi
 # --------- 全局变量 ----------
 XRAY_BIN="/usr/local/bin/xray"
 XRAY_SERVICE="xray.service"
+
 BASE_DIR="/usr/local/etc/xray"
 NODES_DIR="$BASE_DIR/nodes"
 TUNNELS_DIR="$BASE_DIR/tunnels"
@@ -35,20 +41,23 @@ XRAY_CONFIG_BAK_DIR="$BASE_DIR/backup"
 # --------- 工具函数 ----------
 now_ts() { date "+%Y-%m-%d %H:%M:%S"; }
 
+die() { echo "错误: $*" >&2; exit 1; }
+
+valid_port() {
+  local p="$1"
+  [[ "$p" =~ ^[0-9]+$ ]] && ((p>=1 && p<=65535))
+}
+
 get_ip() {
   curl -s ipv4.ip.sb 2>/dev/null || curl -s ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}'
 }
-
-die() { echo "错误: $*" >&2; exit 1; }
-
-need_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 ensure_dirs() {
   mkdir -p "$BASE_DIR" "$NODES_DIR" "$TUNNELS_DIR" "$OUTBOUNDS_DIR" "$ROUTES_DIR" "$XRAY_CONFIG_BAK_DIR"
 }
 
 install_deps() {
-  local deps=(curl jq openssl unzip iptables iptables-persistent netfilter-persistent)
+  local deps=(curl jq openssl unzip iptables iptables-persistent netfilter-persistent python3)
   local missing=()
   for p in "${deps[@]}"; do
     dpkg -s "$p" &>/dev/null || missing+=("$p")
@@ -69,22 +78,33 @@ install_xray_if_missing() {
   fi
 }
 
-start_xray() {
+bootstrap() {
+  ensure_dirs
+  install_deps
+  install_xray_if_missing
+
   systemctl enable "$XRAY_SERVICE" >/dev/null 2>&1 || true
-  systemctl restart "$XRAY_SERVICE" || die "Xray 重启失败"
+
+  # 如果没有配置先生成一个空配置（避免服务无配置启动失败）
+  if [[ ! -f "$XRAY_CONFIG_PATH" ]]; then
+    cat > "$XRAY_CONFIG_PATH" <<EOF
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [],
+  "outbounds": [{ "tag":"direct","protocol":"freedom" }],
+  "routing": { "domainStrategy":"AsIs", "rules":[] }
+}
+EOF
+  fi
+
+  systemctl restart "$XRAY_SERVICE" >/dev/null 2>&1 || true
 }
 
 status_xray() {
   systemctl status "$XRAY_SERVICE" --no-pager || true
 }
 
-# 端口校验
-valid_port() {
-  local p="$1"
-  [[ "$p" =~ ^[0-9]+$ ]] && ((p>=1 && p<=65535))
-}
-
-# 文件安全写入 + 校验 + 回滚
+# --------- 配置安全写入 + 校验 + 回滚 ----------
 apply_config_safely() {
   local tmp="$XRAY_CONFIG_PATH.tmp"
   local bak="$XRAY_CONFIG_BAK_DIR/config_$(date +%Y%m%d_%H%M%S).json"
@@ -92,19 +112,14 @@ apply_config_safely() {
   # jq 校验
   jq . "$tmp" >/dev/null 2>&1 || die "生成的 JSON 配置无效（jq 校验未通过）"
 
-  # xray -test（可用则启用）
+  # 官方推荐测试：xray run -test -c <config>
   if [[ -x "$XRAY_BIN" ]]; then
-    if [[ -x "$XRAY_BIN" ]]; then
-  if "$XRAY_BIN" run -test -config "$tmp" >/dev/null 2>&1; then
-    :
-  elif "$XRAY_BIN" -test -config "$tmp" >/dev/null 2>&1; then
-    :
-  else
-    echo "警告: Xray 配置测试未通过（run -test / -test 均失败），将不应用该配置"
-    exit 1
-  fi
-fi
-
+    if "$XRAY_BIN" run -test -c "$tmp" >/dev/null 2>&1; then
+      :
+    else
+      echo "警告: Xray 配置测试未通过（xray run -test -c ...），将不应用该配置"
+      exit 1
+    fi
   fi
 
   # 备份旧配置
@@ -127,7 +142,7 @@ fi
   fi
 }
 
-# --------- 配置生成 ----------
+# --------- 核心：从实体文件生成 config ----------
 generate_config() {
   ensure_dirs
 
@@ -135,8 +150,9 @@ generate_config() {
   local outbounds_json="[]"
   local rules_json="[]"
 
-  # ---------- inbounds: nodes ----------
   shopt -s nullglob
+
+  # ---- inbounds: nodes ----
   for f in "$NODES_DIR"/*.json; do
     local enabled type
     enabled="$(jq -r '.enabled // true' "$f")"
@@ -151,7 +167,12 @@ generate_config() {
       privkey="$(jq -r '.private_key' "$f")"
       short_id="$(jq -r '.short_id' "$f")"
 
-      # Reality VLESS inbound（每用户一端口）
+      # 防止坏文件导致整体无法应用：跳过空 key 的 vless
+      if [[ -z "$privkey" || "$privkey" == "null" ]]; then
+        echo "警告: 跳过坏的 VLESS 文件（private_key 为空）: $(basename "$f")"
+        continue
+      fi
+
       local inbound
       inbound="$(cat <<EOF
 {
@@ -187,6 +208,11 @@ EOF
       method="$(jq -r '.method' "$f")"
       password="$(jq -r '.password' "$f")"
 
+      if [[ -z "$password" || "$password" == "null" || -z "$method" || "$method" == "null" ]]; then
+        echo "警告: 跳过坏的 SS 文件: $(basename "$f")"
+        continue
+      fi
+
       local inbound
       inbound="$(cat <<EOF
 {
@@ -206,7 +232,7 @@ EOF
     fi
   done
 
-  # ---------- inbounds: tunnels ----------
+  # ---- inbounds: tunnels ----
   for f in "$TUNNELS_DIR"/*.json; do
     local enabled
     enabled="$(jq -r '.enabled // true' "$f")"
@@ -235,13 +261,11 @@ EOF
     inbounds_json="$(echo "$inbounds_json" | jq --argjson x "$inbound" '. + [$x]')"
   done
 
-  # ---------- outbounds: built-in ----------
-  # direct
+  # ---- outbounds: built-in ----
   outbounds_json="$(echo "$outbounds_json" | jq '. + [{"tag":"direct","protocol":"freedom"}]')"
-  # block
   outbounds_json="$(echo "$outbounds_json" | jq '. + [{"tag":"block","protocol":"blackhole"}]')"
 
-  # ---------- outbounds: custom ----------
+  # ---- outbounds: custom (only shadowsocks for now) ----
   for f in "$OUTBOUNDS_DIR"/*.json; do
     local enabled
     enabled="$(jq -r '.enabled // true' "$f")"
@@ -257,6 +281,11 @@ EOF
       port="$(jq -r '.port' "$f")"
       method="$(jq -r '.method' "$f")"
       password="$(jq -r '.password' "$f")"
+
+      if [[ -z "$server" || "$server" == "null" || -z "$password" || "$password" == "null" ]]; then
+        echo "警告: 跳过坏的 outbound 文件: $(basename "$f")"
+        continue
+      fi
 
       local ob
       ob="$(cat <<EOF
@@ -280,7 +309,7 @@ EOF
     fi
   done
 
-  # ---------- routing rules (no built-in, user-defined only) ----------
+  # ---- routing rules: user-defined only ----
   for f in "$ROUTES_DIR"/*.json; do
     local enabled
     enabled="$(jq -r '.enabled // true' "$f")"
@@ -291,7 +320,6 @@ EOF
     outbound_tag="$(jq -r '.outbound' "$f")"
 
     if [[ "$rtype" == "domain" ]]; then
-      # domains: array
       local domains
       domains="$(jq -c '.domains' "$f")"
       local rule
@@ -307,7 +335,7 @@ EOF
     fi
   done
 
-  # 写入 tmp
+  # ---- write tmp config ----
   cat > "$XRAY_CONFIG_PATH.tmp" <<EOF
 {
   "log": {
@@ -323,6 +351,31 @@ EOF
 EOF
 
   apply_config_safely
+}
+
+# --------- robust x25519 parsing ----------
+get_x25519_keys() {
+  local keys priv pub
+  keys="$("$XRAY_BIN" x25519 2>/dev/null || true)"
+
+  # 优先解析 "xxx: yyy"
+  priv="$(echo "$keys" | awk -F': *' 'tolower($0) ~ /private/ {print $2; exit}' | tr -d '\r' | xargs)"
+  pub="$(echo "$keys"  | awk -F': *' 'tolower($0) ~ /public/  {print $2; exit}' | tr -d '\r' | xargs)"
+
+  # 兜底：没有冒号就取最后一列
+  if [[ -z "$priv" || -z "$pub" ]]; then
+    priv="$(echo "$keys" | awk 'tolower($0) ~ /private/ {print $NF; exit}' | tr -d '\r' | xargs)"
+    pub="$(echo "$keys"  | awk 'tolower($0) ~ /public/  {print $NF; exit}' | tr -d '\r' | xargs)"
+  fi
+
+  if [[ -z "$priv" || -z "$pub" ]]; then
+    echo "xray x25519 输出如下（用于排查）："
+    echo "$keys"
+    return 1
+  fi
+
+  echo "$priv|$pub"
+  return 0
 }
 
 # --------- 实体创建 ----------
@@ -343,25 +396,17 @@ add_vless_node() {
 
   read -rp "备注（可空）: " remark
 
-  local uuid keys priv pub short_id created
+  local uuid short_id created
   uuid="$("$XRAY_BIN" uuid)"
-  keys="$("$XRAY_BIN" x25519 2>/dev/null || true)"
-  priv="$(echo "$keys" | awk -F': *' 'tolower($0) ~ /private/ {print $2; exit}' | tr -d '\r' | xargs)"
-  pub="$(echo "$keys"  | awk -F': *' 'tolower($0) ~ /public/  {print $2; exit}' | tr -d '\r' | xargs)"
-
-  # 兜底：如果没带冒号，按空格拆
-  if [[ -z "$priv" || -z "$pub" ]]; then
-    priv="$(echo "$keys" | awk 'tolower($0) ~ /private/ {print $NF; exit}' | tr -d '\r' | xargs)"
-    pub="$(echo "$keys"  | awk 'tolower($0) ~ /public/  {print $NF; exit}' | tr -d '\r' | xargs)"
-  fi
-
-  if [[ -z "$priv" || -z "$pub" ]]; then
-    echo "xray x25519 输出如下（用于排查）："
-    echo "$keys"
-    die "无法解析 x25519 的私钥/公钥，请检查 Xray 版本输出格式"
-  fi
   short_id="$(openssl rand -hex 2)"
   created="$(now_ts)"
+
+  local kp priv pub
+  if ! kp="$(get_x25519_keys)"; then
+    die "无法解析 x25519 的私钥/公钥，请检查 Xray 版本输出格式"
+  fi
+  priv="${kp%%|*}"
+  pub="${kp##*|}"
 
   local file="$NODES_DIR/vless_${port}_${uuid}.json"
   cat > "$file" <<EOF
@@ -385,7 +430,6 @@ EOF
 
   generate_config
 
-  # 输出链接
   echo "节点链接："
   echo "vless://${uuid}@${domain}:${port}?type=tcp&security=reality&pbk=${pub}&fp=chrome&sni=${server_name}&sid=${short_id}&spx=%2F&flow=xtls-rprx-vision#Reality-${port}"
 }
@@ -393,7 +437,7 @@ EOF
 add_ss_node() {
   ensure_dirs
 
-  local port method password remark created
+  local port method password remark created id
   read -rp "请输入端口（默认10000）: " port
   port="${port:-10000}"
   valid_port "$port" || die "端口无效"
@@ -402,9 +446,8 @@ add_ss_node() {
   method="2022-blake3-aes-256-gcm"
   password="$(head -c 32 /dev/urandom | base64 | tr -d '\n')"
   created="$(now_ts)"
-
-  local id
   id="$(openssl rand -hex 6)"
+
   local file="$NODES_DIR/ss_${port}_${id}.json"
   cat > "$file" <<EOF
 {
@@ -550,7 +593,7 @@ view_export_all() {
   echo -e "\n导出文件：$export_file"
 }
 
-# --------- 删除（统一入口：node / tunnel / outbound / route） ----------
+# --------- 删除（统一入口） ----------
 pick_and_delete() {
   ensure_dirs
   echo "请选择要删除的类型："
@@ -595,7 +638,7 @@ pick_and_delete() {
   generate_config
 }
 
-# --------- 分流出口管理（outbound） ----------
+# --------- 分流出口（outbound） ----------
 set_split_outbound() {
   ensure_dirs
   echo "添加/更新 分流出口（建议填 TW 的 SS 节点）"
@@ -637,7 +680,7 @@ EOF
   generate_config
 }
 
-# --------- 分流规则管理（route） ----------
+# --------- 分流规则（route） ----------
 set_split_rule() {
   ensure_dirs
   echo "创建/更新 分流规则（不内置规则，你输入域名列表即可）"
@@ -656,8 +699,6 @@ set_split_rule() {
   read -rp "备注（可空）: " remark
   created="$(now_ts)"
 
-  # 转为 JSON array
-  # 支持用户输入带空格，自动trim
   local domains_json
   domains_json="$(python3 - <<PY
 import json
@@ -684,25 +725,23 @@ EOF
   generate_config
 }
 
-# --------- 初始化（启动即补齐环境） ----------
-bootstrap() {
+# --------- 清理坏节点（空 key） ----------
+cleanup_broken_nodes() {
   ensure_dirs
-  install_deps
-  install_xray_if_missing
-  # 确保服务存在/可启
-  systemctl enable "$XRAY_SERVICE" >/dev/null 2>&1 || true
-  # 如果没有配置先生成一个空配置（避免服务无配置启动失败）
-  if [[ ! -f "$XRAY_CONFIG_PATH" ]]; then
-    cat > "$XRAY_CONFIG_PATH" <<EOF
-{
-  "log": { "loglevel": "warning" },
-  "inbounds": [],
-  "outbounds": [{ "tag":"direct","protocol":"freedom" }],
-  "routing": { "domainStrategy":"AsIs", "rules":[] }
-}
-EOF
-  fi
-  systemctl restart "$XRAY_SERVICE" >/dev/null 2>&1 || true
+  local count=0
+  shopt -s nullglob
+  for f in "$NODES_DIR"/vless_*.json; do
+    local priv pub
+    priv="$(jq -r '.private_key // ""' "$f")"
+    pub="$(jq -r '.public_key // ""' "$f")"
+    if [[ -z "$priv" || "$priv" == "null" || -z "$pub" || "$pub" == "null" ]]; then
+      echo "删除坏的 VLESS 节点文件（空 key）: $(basename "$f")"
+      rm -f "$f"
+      ((count++))
+    fi
+  done
+  echo "清理完成，删除 $count 个坏节点文件"
+  generate_config
 }
 
 # --------- 菜单 ----------
@@ -716,6 +755,7 @@ show_menu() {
   echo "6) 设置分流出口"
   echo "7) 设置分流规则"
   echo "8) 查看 Xray 状态"
+  echo "9) 清理坏节点（空 key）"
   echo "0) 退出"
   echo "======================================="
 }
@@ -736,6 +776,7 @@ main() {
       6) set_split_outbound ;;
       7) set_split_rule ;;
       8) status_xray ;;
+      9) cleanup_broken_nodes ;;
       0) exit 0 ;;
       *) echo "无效选项" ;;
     esac
